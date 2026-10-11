@@ -32,8 +32,12 @@ param(
   # "invalid-scratch" (the default): every server-side trigger is REJECTED by
   # Pusher. "unset": the secret is missing, so trigger() THROWS before it
   # returns a promise. Both must leave every response unchanged; see
-  # src/lib/realtime.ts. Never a real secret: that is what this script prevents.
-  [ValidateSet("invalid-scratch", "unset")] [string] $PusherSecret = "invalid-scratch",
+  # src/lib/realtime.ts. "real": the .env secret is left alone, for the one
+  # harness check that needs delivery to work (verify-meetup-both-sides, test
+  # 8). Opt-in only, and only after checking the scratch schema holds no copy
+  # of a live user: events go to private-user-<id> channels of scratch rows.
+  # Every OTHER disarm below still applies.
+  [ValidateSet("invalid-scratch", "unset", "real")] [string] $PusherSecret = "invalid-scratch",
   [string] $ProjectDir = "D:\BAYLO\baylo"
 )
 
@@ -92,6 +96,8 @@ $fake = [ordered]@{
   # harnesses' budget arithmetic assumes.
   TRUST_PROXY           = ""
 }
+# "real": PUSHER_SECRET is not overridden at all, so Next reads it from .env.
+if ($PusherSecret -eq "real") { $fake.Remove("PUSHER_SECRET") }
 $saved = @{}
 foreach ($k in @($fake.Keys) + "DATABASE_URL") { $saved[$k] = [Environment]::GetEnvironmentVariable($k, "Process") }
 
@@ -106,6 +112,9 @@ try {
   foreach ($k in $fake.Keys) {
     $v = [Environment]::GetEnvironmentVariable($k, "Process")
     Write-Host ("  {0,-21} : {1}" -f $k, $(if ($v) { $v } else { "<cleared>" }))
+  }
+  if ($PusherSecret -eq "real") {
+    Write-Host ("  {0,-21} : {1}" -f "PUSHER_SECRET", "REAL (from .env) -- events are delivered") -ForegroundColor Yellow
   }
   Write-Host ""
 
