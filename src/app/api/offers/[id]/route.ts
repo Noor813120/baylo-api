@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { resolveSession } from "@/lib/api-auth"
 import prisma from "@/lib/prisma"
-import pusher from "@/lib/pusher"
+import { notifyUser } from "@/lib/realtime"
 import { dealByAnyId, expireStaleOffers } from "@/lib/offers"
 import { offerActionSchema, parseBody } from "@/lib/validation"
 import { enforceAcceptTrade } from "@/lib/reputation-gate"
@@ -437,11 +437,13 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
           : { entityType: "conversation", entityId: myId }),
       },
     })
-    pusher
-      .trigger(`private-user-${offer.senderId}`, "notification-created", {
-        type: action === "accept" ? "TRADE_ACCEPTED" : "TRADE_REJECTED",
-      })
-      .catch(() => {})
+    // Sent now, awaited with the last batch below: nothing is ordered after it,
+    // so a hanging Pusher costs one client timeout here, not one per await.
+    // notifyUser() never rejects. (A trigger that threw here used to skip
+    // writing both offer-update cards.) See @/lib/realtime.
+    const bellNotified = notifyUser(offer.senderId, "notification-created", {
+      type: action === "accept" ? "TRADE_ACCEPTED" : "TRADE_REJECTED",
+    })
 
     const actorName = offer.receiver?.name ?? "They"
     const updatePayload = {
@@ -498,51 +500,50 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       createdAt: counterpartMsg.createdAt.toISOString(),
     } : null
 
-    pusher
-      .trigger(`private-user-${offer.senderId}`, "offer-updated", {
-        offerId,
-        status: newStatus,
-        actorName,
-        releasedLeaves: action === "decline" && proposerPays ? fee : 0,
-        systemMessage: {
-          id: systemMsg.id,
-          content: systemMsg.content,
-          senderId: systemMsg.senderId,
-          receiverId: systemMsg.receiverId,
-          createdAt: systemMsg.createdAt.toISOString(),
-        },
-        ...(tradeRecord && {
-          tradeId: tradeRecord.id,
-          offeredItemTitle: tradeRecord.offeredItemTitle,
-          requestedItemTitle: tradeRecord.requestedItemTitle,
-          senderName: offer.sender?.name ?? "",
-          receiverName: actorName,
-          receiverId: offer.receiverId,
-        }),
-      })
-      .then(() => Promise.all([
-        pusher.trigger(`private-user-${offer.senderId}`, "new-message", senderSystemPayload),
-        ...(receiverSystemPayload ? [
-          pusher.trigger(`private-user-${offer.receiverId}`, "new-message", receiverSystemPayload),
-        ] : []),
-        ...(receiverSystemPayload ? [
-          pusher.trigger(`private-user-${offer.receiverId}`, "offer-updated", {
-            offerId,
-            status: newStatus,
-            actorName,
-            systemMessage: receiverSystemPayload ?? undefined,
-            ...(tradeRecord && {
-              tradeId: tradeRecord.id,
-              offeredItemTitle: tradeRecord.offeredItemTitle,
-              requestedItemTitle: tradeRecord.requestedItemTitle,
-              senderName: offer.sender?.name ?? "",
-              receiverName: actorName,
-              receiverId: offer.receiverId,
-            }),
+    // offer-updated reaches the sender before the new-message events, as it
+    // always has: the card needs the status before the bubble arrives.
+    await notifyUser(offer.senderId, "offer-updated", {
+      offerId,
+      status: newStatus,
+      actorName,
+      releasedLeaves: action === "decline" && proposerPays ? fee : 0,
+      systemMessage: {
+        id: systemMsg.id,
+        content: systemMsg.content,
+        senderId: systemMsg.senderId,
+        receiverId: systemMsg.receiverId,
+        createdAt: systemMsg.createdAt.toISOString(),
+      },
+      ...(tradeRecord && {
+        tradeId: tradeRecord.id,
+        offeredItemTitle: tradeRecord.offeredItemTitle,
+        requestedItemTitle: tradeRecord.requestedItemTitle,
+        senderName: offer.sender?.name ?? "",
+        receiverName: actorName,
+        receiverId: offer.receiverId,
+      }),
+    })
+    await Promise.all([
+      bellNotified,
+      notifyUser(offer.senderId, "new-message", senderSystemPayload),
+      ...(receiverSystemPayload ? [
+        notifyUser(offer.receiverId, "new-message", receiverSystemPayload),
+        notifyUser(offer.receiverId, "offer-updated", {
+          offerId,
+          status: newStatus,
+          actorName,
+          systemMessage: receiverSystemPayload,
+          ...(tradeRecord && {
+            tradeId: tradeRecord.id,
+            offeredItemTitle: tradeRecord.offeredItemTitle,
+            requestedItemTitle: tradeRecord.requestedItemTitle,
+            senderName: offer.sender?.name ?? "",
+            receiverName: actorName,
+            receiverId: offer.receiverId,
           }),
-        ] : []),
-      ]))
-      .catch(() => {})
+        }),
+      ] : []),
+    ])
 
     return NextResponse.json({
       status: newStatus,

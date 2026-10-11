@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { resolveSession } from "@/lib/api-auth"
 import prisma from "@/lib/prisma"
-import pusher from "@/lib/pusher"
+import { notifyUser } from "@/lib/realtime"
 import { ITEM_PUBLIC_SELECT, preciseAccessItemIds, shapeItem } from "@/lib/item-visibility"
 import { parseBody, createTradeSchema, tradeStatusSchema } from "@/lib/validation"
 import { enforceInitiateTrade, enforceAcceptTrade } from "@/lib/reputation-gate"
@@ -231,7 +231,7 @@ export async function POST(req: NextRequest) {
       senderName: sender?.name ?? "",
       senderAvatar: sender?.avatar ?? null,
     }
-    pusher.trigger(`private-user-${requestedItem.userId}`, "new-message", pusherPayload).catch(() => {})
+    await notifyUser(requestedItem.userId, "new-message", pusherPayload)
 
     return NextResponse.json(asTradeRequest(trade), { status: 201 })
   } catch {
@@ -379,24 +379,24 @@ export async function PATCH(req: NextRequest) {
         take: 50,
       })
 
-      const pusherPromises: Promise<unknown>[] = [
-        pusher.trigger(`private-user-${trade.senderId}`, "trade-status-changed", {
+      // Promise.allSettled() alone did not make this safe: a trigger that
+      // throws before returning a promise threw out of the array literal. See
+      // @/lib/realtime.
+      await Promise.all([
+        notifyUser(trade.senderId, "trade-status-changed", {
           tradeId,
           newStatus: "ACCEPTED",
           itemIds: [trade.offeredItemId, trade.requestedItemId],
         }),
-      ]
-      for (const rival of rivals2) {
-        pusherPromises.push(
-          pusher.trigger(`private-user-${rival.senderId}`, "trade-status-changed", {
+        ...rivals2.map((rival) =>
+          notifyUser(rival.senderId, "trade-status-changed", {
             tradeId:   rival.id,
             newStatus: "REJECTED",
             reason:    "item_unavailable",
             itemIds:   [trade.offeredItemId, trade.requestedItemId],
-          })
-        )
-      }
-      await Promise.allSettled(pusherPromises)
+          }),
+        ),
+      ])
 
       return NextResponse.json({ status: "ACCEPTED" })
     }
@@ -420,7 +420,8 @@ export async function PATCH(req: NextRequest) {
           actorId: myId,
         },
       })
-      await pusher.trigger(`private-user-${trade.senderId}`, "trade-status-changed", {
+      // The decline is saved: a Pusher failure is logged, never the response.
+      await notifyUser(trade.senderId, "trade-status-changed", {
         tradeId,
         newStatus: "REJECTED",
         itemIds:   [trade.offeredItemId, trade.requestedItemId],

@@ -132,7 +132,14 @@ try {
     $results.Add([pscustomobject]@{ Suite = $s.Name; Status = $status; Passed = $passed; Failed = $failed; Expected = $s.Expected; Exit = $code })
   }
 } finally {
-  foreach ($k in $saved.Keys) { [Environment]::SetEnvironmentVariable($k, $saved[$k], "Process") }
+  # A key the window did not have is DELETED, not restored as "": PowerShell
+  # passes $null to .NET as "", which left every such key defined and empty
+  # (same flaw as scratch-dev-safe.ps1, fixed there 11 Oct 2026).
+  # [NullString]::Value is the one value that reaches .NET as null.
+  foreach ($k in $saved.Keys) {
+    $v = if ($null -eq $saved[$k]) { [NullString]::Value } else { $saved[$k] }
+    [Environment]::SetEnvironmentVariable($k, $v, "Process")
+  }
   Pop-Location
 }
 

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server"
 import { resolveSession } from "@/lib/api-auth"
-import pusher from "@/lib/pusher"
+import { notifyUser } from "@/lib/realtime"
 import { blockDirection } from "@/lib/blocking"
 import { legacyOrgRefusal, resolveInbox } from "@/lib/inbox"
 
@@ -23,11 +23,12 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true })
     }
 
-    pusher.trigger(`private-user-${receiverId}`, "typing", {
+    // Decoration: a Pusher failure is logged, the answer stays { ok: true }.
+    await notifyUser(receiverId, "typing", {
       senderId,
       senderName: inbox.acting.organization?.name ?? session.user.name ?? "Someone",
       isTyping: body.isTyping === true,
-    }).catch(() => {})
+    })
 
     return NextResponse.json({ ok: true })
   } catch {

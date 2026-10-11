@@ -1,6 +1,6 @@
 import type { PrismaClient } from "@/generated/prisma/client"
 import prisma from "@/lib/prisma"
-import pusher from "@/lib/pusher"
+import { notifyUser } from "@/lib/realtime"
 import { categoryLabel } from "@/lib/v1/taxonomy"
 import { userNotBlocked } from "@/lib/blocking"
 import { notSuspendedWhere } from "@/lib/moderation"
@@ -472,11 +472,10 @@ export function notifyCategoryMatchesAsync(input: {
       )
     }
 
-    for (const m of matches) {
-      pusher
-        .trigger(`private-user-${m.ownerId}`, "notification-created", { type: "CATEGORY_MATCH" })
-        .catch(() => {})
-    }
+    // One trigger that threw used to end this loop for every owner after it.
+    await Promise.all(
+      matches.map((m) => notifyUser(m.ownerId, "notification-created", { type: "CATEGORY_MATCH" })),
+    )
   })().catch((e) => {
     // Matching is best-effort: a listing must not fail because nobody was told
     // about it. But it is LOGGED — until 2 Oct 2026 this catch was silent, and

@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server"
 import { resolveSession } from "@/lib/api-auth"
 import prisma from "@/lib/prisma"
 import { releaseTradeFee } from "@/lib/trade-fee-release"
-import pusher from "@/lib/pusher"
+import { notifyUser } from "@/lib/realtime"
 import { parseBody, tradeActionSchema } from "@/lib/validation"
 import { legacyParticipantRefusal, resolveTradeParticipant } from "@/lib/trade-participant"
 
@@ -104,17 +104,14 @@ export async function PATCH(
         },
       })
 
-      await pusher.trigger(`private-user-${otherId}`, "trade-status-changed", {
-        tradeId,
-        newStatus: "CANCELLED",
-        itemIds,
-      })
-      // Also notify the canceller's own channel so other tabs update
-      await pusher.trigger(`private-user-${myId}`, "trade-status-changed", {
-        tradeId,
-        newStatus: "CANCELLED",
-        itemIds,
-      })
+      // The partner, and the canceller's own channel so other tabs update. The
+      // cancel is saved: a Pusher failure is logged, never the response. See
+      // @/lib/realtime.
+      const changed = { tradeId, newStatus: "CANCELLED", itemIds }
+      await Promise.all([
+        notifyUser(otherId, "trade-status-changed", changed),
+        notifyUser(myId, "trade-status-changed", changed),
+      ])
 
       void otherName
       return NextResponse.json({ ok: true, releasedLeaves: refund?.amount ?? 0 })

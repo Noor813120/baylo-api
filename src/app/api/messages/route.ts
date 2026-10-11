@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { resolveSession } from "@/lib/api-auth"
 import prisma from "@/lib/prisma"
-import pusher from "@/lib/pusher"
+import { notifyUser } from "@/lib/realtime"
 import { createMessageSchema, parseBody } from "@/lib/validation"
 import { blockDirection, enforceNotBlocked } from "@/lib/blocking"
 import { legacyOrgRefusal, resolveInbox } from "@/lib/inbox"
@@ -150,7 +150,9 @@ export async function POST(req: NextRequest) {
       senderName: shop ? shop.name ?? inbox.acting.organization?.name ?? "" : session.user.name ?? "",
       senderAvatar: shop ? shop.avatar ?? null : session.user.image ?? null,
     }
-    pusher.trigger(`private-user-${receiverId}`, "new-message", payload).catch(() => {})
+    // The message is saved. A 500 here made the phone keep the draft and a
+    // second tap saved it twice. See @/lib/realtime.
+    await notifyUser(receiverId, "new-message", payload)
 
     return NextResponse.json(message, { status: 201 })
   } catch {
