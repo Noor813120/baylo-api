@@ -74,13 +74,16 @@ foreach ($f in ".env", ".env.local", ".env.development", ".env.development.local
 }
 
 # ── Disarmed environment, this process only ─────────────────────────────────
-# Every value here is fake. An empty value is how a variable is CLEARED: on
-# Windows, setting an environment variable to "" removes it, and the check
-# above guarantees no .env file puts it back.
+# Every value here is fake. An empty value leaves the variable DEFINED but
+# empty (measured 11 Oct 2026: .NET's SetEnvironmentVariable(k, "") does not
+# delete it here), which the app's truthiness checks read as unset AND which
+# stops Next refilling it from a .env file. For the pooler that is the safer
+# of the two; the check above also refuses any .env that defines it.
 $fake = [ordered]@{
   DATABASE_POOL_URL     = ""                                # the live transaction pooler: never
-  # "" would DELETE the variable and Next would refill it from .env, so "unset"
-  # travels as a sentinel that src/lib/pusher.ts maps to a missing secret.
+  # "" would leave an EMPTY secret, which signs (an empty HMAC key is valid)
+  # and so never throws. "unset" travels as a sentinel that src/lib/pusher.ts
+  # maps to a genuinely missing secret, which does.
   PUSHER_SECRET         = $(if ($PusherSecret -eq "unset") { "__unset__" } else { "invalid-scratch" })  # server-side triggers fail; nothing reaches phones
   EMAIL_SMTP_HOST       = "127.0.0.1"                       # the harnesses' own SMTP sink...
   EMAIL_SMTP_PORT       = "2525"                            # ...which they open on this port
@@ -96,18 +99,24 @@ $fake = [ordered]@{
   # harnesses' budget arithmetic assumes.
   TRUST_PROXY           = ""
 }
-# "real": PUSHER_SECRET is CLEARED (an empty value deletes it), so Next reads
-# it from .env. Not merely left alone: a window that once exported a value
-# (a rehearsal that "disabled Pusher", say) would hand that stale value to the
-# server and Next never overrides a variable that is already set. Measured 11
-# Oct 2026: the server signed channel auth with neither .env's secret nor
-# "invalid-scratch", and every real subscription failed.
-if ($PusherSecret -eq "real") { $fake["PUSHER_SECRET"] = "" }
+# "real": PUSHER_SECRET is DELETED (below, after the loop), so Next reads it
+# from .env. Not left alone: a value the window exported would reach the
+# server, and Next never overrides a variable that is already set. Not "" and
+# not $null: PowerShell passes $null to a .NET string parameter as "", and ""
+# leaves the variable defined and EMPTY. The first version of this option did
+# exactly that -- measured 11 Oct 2026, the server signed channel auth with an
+# empty secret and every real subscription failed. [NullString]::Value is the
+# one value that reaches .NET as null, which deletes. It stays in $fake so it
+# is saved and restored like every other key.
 $saved = @{}
 foreach ($k in @($fake.Keys) + "DATABASE_URL") { $saved[$k] = [Environment]::GetEnvironmentVariable($k, "Process") }
 
 try {
   foreach ($k in $fake.Keys) { [Environment]::SetEnvironmentVariable($k, $fake[$k], "Process") }
+  if ($PusherSecret -eq "real") {
+    [Environment]::SetEnvironmentVariable("PUSHER_SECRET", [NullString]::Value, "Process")
+    if ([Environment]::GetEnvironmentVariables("Process").Contains("PUSHER_SECRET")) { Refuse "could not delete PUSHER_SECRET for -PusherSecret real." }
+  }
   if ([Environment]::GetEnvironmentVariable("DATABASE_POOL_URL", "Process")) { Refuse "could not clear DATABASE_POOL_URL." }
 
   Write-Host ""
@@ -134,7 +143,15 @@ try {
   # Blocks until Ctrl+C. The finally below still runs.
   & (Join-Path $ProjectDir "scripts\scratch.ps1") -Dev -Name $Name -Port $Port -ProjectDir $ProjectDir
 } finally {
-  foreach ($k in $saved.Keys) { [Environment]::SetEnvironmentVariable($k, $saved[$k], "Process") }
+  # A key the window did not have is DELETED, not restored as "": PowerShell
+  # passes $null to .NET as "", which left every such key defined and empty --
+  # and a live `npm run dev:clean` from this window then ran with an empty
+  # Pusher secret, Cloudinary secret, SMTP host and NEXTAUTH_URL (found 11 Oct
+  # 2026). [NullString]::Value is the one value that reaches .NET as null.
+  foreach ($k in $saved.Keys) {
+    $v = if ($null -eq $saved[$k]) { [NullString]::Value } else { $saved[$k] }
+    [Environment]::SetEnvironmentVariable($k, $v, "Process")
+  }
   Write-Host "`n  environment restored. Schema $Name is KEPT -- drop it with: .\scripts\scratch.ps1 -Drop -Name $Name"
   Write-Host "  restart your live server with: npm run dev:clean`n"
 }

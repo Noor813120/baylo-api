@@ -7,11 +7,11 @@ import Pusher from "pusher";
  */
 
 // The sentinel exists for scripts/scratch-dev-safe.ps1 -PusherSecret unset.
-// On Windows an empty environment variable is a deleted one, and Next then
-// refills a deleted variable from .env, so "no secret" cannot be expressed by
-// clearing it. This maps the sentinel to the genuinely missing secret, which
-// makes trigger() throw synchronously exactly as it would on a server whose
-// .env lacks the line.
+// "No secret" cannot be expressed through the environment: a deleted variable
+// is refilled by Next from .env, and an EMPTY one signs happily (an empty HMAC
+// key is valid) so it never throws. This maps the sentinel to the genuinely
+// missing secret, which makes trigger() throw synchronously exactly as it
+// would on a server whose .env lacks the line.
 const secret = process.env.PUSHER_SECRET === "__unset__" ? undefined : process.env.PUSHER_SECRET;
 
 const pusherServer = new Pusher({
