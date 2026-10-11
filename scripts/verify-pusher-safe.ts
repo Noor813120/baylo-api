@@ -164,8 +164,11 @@ async function partB() {
 type Json = Record<string, any>
 const BASE = process.env.ACCEPT_BASE ?? "http://127.0.0.1:3001"
 // A response slower than this means notifyUser() was waiting on something it
-// should have given up on (the client timeout is 3 s; two sequential awaits in
-// the offer decision make 6 s the honest ceiling).
+// should have given up on (the client timeout is 3 s; the offer decision has
+// two sequential awaits, so 6 s is the honest worst case, plus headroom). The
+// FIRST hit on a route after a dev-server restart also compiles it, which on
+// this machine has measured up to ~10 s for routes with no Pusher call at all
+// (confirm/start), so a slow first run is re-timed warm before it is believed.
 const SLOW_MS = 8000
 
 async function call(method: string, path: string, token: string, body?: Json) {

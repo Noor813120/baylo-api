@@ -437,9 +437,11 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
           : { entityType: "conversation", entityId: myId }),
       },
     })
-    // Before the system messages below. A trigger that threw here used to skip
-    // writing both offer-update cards; it can no longer throw. See @/lib/realtime.
-    await notifyUser(offer.senderId, "notification-created", {
+    // Sent now, awaited with the last batch below: nothing is ordered after it,
+    // so a hanging Pusher costs one client timeout here, not one per await.
+    // notifyUser() never rejects. (A trigger that threw here used to skip
+    // writing both offer-update cards.) See @/lib/realtime.
+    const bellNotified = notifyUser(offer.senderId, "notification-created", {
       type: action === "accept" ? "TRADE_ACCEPTED" : "TRADE_REJECTED",
     })
 
@@ -522,6 +524,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       }),
     })
     await Promise.all([
+      bellNotified,
       notifyUser(offer.senderId, "new-message", senderSystemPayload),
       ...(receiverSystemPayload ? [
         notifyUser(offer.receiverId, "new-message", receiverSystemPayload),

@@ -96,8 +96,13 @@ $fake = [ordered]@{
   # harnesses' budget arithmetic assumes.
   TRUST_PROXY           = ""
 }
-# "real": PUSHER_SECRET is not overridden at all, so Next reads it from .env.
-if ($PusherSecret -eq "real") { $fake.Remove("PUSHER_SECRET") }
+# "real": PUSHER_SECRET is CLEARED (an empty value deletes it), so Next reads
+# it from .env. Not merely left alone: a window that once exported a value
+# (a rehearsal that "disabled Pusher", say) would hand that stale value to the
+# server and Next never overrides a variable that is already set. Measured 11
+# Oct 2026: the server signed channel auth with neither .env's secret nor
+# "invalid-scratch", and every real subscription failed.
+if ($PusherSecret -eq "real") { $fake["PUSHER_SECRET"] = "" }
 $saved = @{}
 foreach ($k in @($fake.Keys) + "DATABASE_URL") { $saved[$k] = [Environment]::GetEnvironmentVariable($k, "Process") }
 
@@ -110,11 +115,15 @@ try {
   Write-Host "  target schema : $Name   (DATABASE_URL = .env base + ?schema=$Name, set by scratch.ps1)"
   Write-Host "  port          : $Port"
   foreach ($k in $fake.Keys) {
+    if ($k -eq "PUSHER_SECRET" -and $PusherSecret -eq "real") { continue }  # shown below
     $v = [Environment]::GetEnvironmentVariable($k, "Process")
     Write-Host ("  {0,-21} : {1}" -f $k, $(if ($v) { $v } else { "<cleared>" }))
   }
   if ($PusherSecret -eq "real") {
-    Write-Host ("  {0,-21} : {1}" -f "PUSHER_SECRET", "REAL (from .env) -- events are delivered") -ForegroundColor Yellow
+    Write-Host ("  {0,-21} : {1}" -f "PUSHER_SECRET", "REAL (cleared here; Next reads .env) -- events are delivered") -ForegroundColor Yellow
+    if ($saved["PUSHER_SECRET"]) {
+      Write-Host ("  {0,-21} : {1}" -f "", "note: this window had PUSHER_SECRET set (length $($saved["PUSHER_SECRET"].Length)); it is restored on exit") -ForegroundColor Yellow
+    }
   }
   Write-Host ""
 
