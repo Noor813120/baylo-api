@@ -20,11 +20,20 @@
 .EXAMPLE
   # After a restart the harness runner asked for: the schema is already pushed
   .\scripts\scratch-dev-safe.ps1 -Name scratch_auth -Port 3001 -NoPush
+.EXAMPLE
+  # Pusher with NO secret at all: trigger() throws synchronously instead of
+  # rejecting. scripts/verify-pusher-safe.ts runs once in each mode.
+  .\scripts\scratch-dev-safe.ps1 -Name scratch_pusher -Port 3001 -PusherSecret unset
 #>
 param(
   [Parameter(Mandatory = $true)] [string] $Name,
   [int]    $Port = 3001,
   [switch] $NoPush,
+  # "invalid-scratch" (the default): every server-side trigger is REJECTED by
+  # Pusher. "unset": the secret is missing, so trigger() THROWS before it
+  # returns a promise. Both must leave every response unchanged; see
+  # src/lib/realtime.ts. Never a real secret: that is what this script prevents.
+  [ValidateSet("invalid-scratch", "unset")] [string] $PusherSecret = "invalid-scratch",
   [string] $ProjectDir = "D:\BAYLO\baylo"
 )
 
@@ -66,7 +75,9 @@ foreach ($f in ".env", ".env.local", ".env.development", ".env.development.local
 # above guarantees no .env file puts it back.
 $fake = [ordered]@{
   DATABASE_POOL_URL     = ""                                # the live transaction pooler: never
-  PUSHER_SECRET         = "invalid-scratch"                 # server-side triggers fail; nothing reaches phones
+  # "" would DELETE the variable and Next would refill it from .env, so "unset"
+  # travels as a sentinel that src/lib/pusher.ts maps to a missing secret.
+  PUSHER_SECRET         = $(if ($PusherSecret -eq "unset") { "__unset__" } else { "invalid-scratch" })  # server-side triggers fail; nothing reaches phones
   EMAIL_SMTP_HOST       = "127.0.0.1"                       # the harnesses' own SMTP sink...
   EMAIL_SMTP_PORT       = "2525"                            # ...which they open on this port
   EMAIL_SMTP_USER       = "scratch-user"                    # the sink accepts any AUTH

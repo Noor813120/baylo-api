@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { resolveSession } from "@/lib/api-auth"
 import prisma from "@/lib/prisma"
-import pusher from "@/lib/pusher"
+import { notifyUser } from "@/lib/realtime"
 import { createOfferSchema, parseBody } from "@/lib/validation"
 import { enforceInitiateTrade } from "@/lib/reputation-gate"
 import { ITEM_IMAGES, toImageUrls, type ImagesLike } from "@/lib/item-images"
@@ -286,17 +286,15 @@ export async function POST(req: NextRequest) {
       data: { senderId, receiverId: post.userId, content: msgContent },
     })
 
-    pusher
-      .trigger(`private-user-${post.userId}`, "new-message", {
-        id: chatMessage.id,
-        content: chatMessage.content,
-        senderId: chatMessage.senderId,
-        receiverId: chatMessage.receiverId,
-        createdAt: chatMessage.createdAt.toISOString(),
-        senderName: sender?.name ?? "",
-        senderAvatar: sender?.avatar ?? null,
-      })
-      .catch(() => {})
+    await notifyUser(post.userId, "new-message", {
+      id: chatMessage.id,
+      content: chatMessage.content,
+      senderId: chatMessage.senderId,
+      receiverId: chatMessage.receiverId,
+      createdAt: chatMessage.createdAt.toISOString(),
+      senderName: sender?.name ?? "",
+      senderAvatar: sender?.avatar ?? null,
+    })
 
     await prisma.notification.deleteMany({
       where: { userId: post.userId, actorId: senderId, type: "NEW_MESSAGE", read: false },

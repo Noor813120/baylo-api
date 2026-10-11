@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server"
 import { resolveSession } from "@/lib/api-auth"
 import prisma from "@/lib/prisma"
 import bcrypt from "bcryptjs"
-import pusher from "@/lib/pusher"
+import { notifyUser } from "@/lib/realtime"
 import { awardTask } from "@/lib/tasks"
 import { MAX_CODE_ATTEMPTS } from "@/lib/swap-code"
 import { confirmSubmitSchema, parseBody } from "@/lib/validation"
@@ -474,16 +474,13 @@ export async function POST(
       }),
     ])
 
+    // The notifications stay fire-and-forget, as they were. The realtime events
+    // used to sit in the same array, where a trigger that threw before
+    // returning a promise threw out of the array literal: the trade was already
+    // COMPLETED and paid, the caller got a 500 on the last code, and the two
+    // notifications were never written. notifyUser() cannot throw. See
+    // @/lib/realtime.
     void Promise.allSettled([
-      ...completionMessages.map((message) =>
-        pusher.trigger(`private-user-${message.receiverId}`, "new-message", {
-          id: message.id,
-          content: message.content,
-          senderId: message.senderId,
-          receiverId: message.receiverId,
-          createdAt: message.createdAt.toISOString(),
-        }),
-      ),
       prisma.notification.create({
         data: {
           userId: trade.senderId, type: "TRADE_COMPLETED",
@@ -500,12 +497,19 @@ export async function POST(
           entityType: "trade", entityId: tradeId,
         },
       }),
-      pusher.trigger(`private-user-${trade.senderId}`, "trade-status-changed", {
-        tradeId, newStatus: "COMPLETED", itemIds,
-      }),
-      pusher.trigger(`private-user-${trade.receiverId}`, "trade-status-changed", {
-        tradeId, newStatus: "COMPLETED", itemIds,
-      }),
+    ])
+    await Promise.all([
+      ...completionMessages.map((message) =>
+        notifyUser(message.receiverId, "new-message", {
+          id: message.id,
+          content: message.content,
+          senderId: message.senderId,
+          receiverId: message.receiverId,
+          createdAt: message.createdAt.toISOString(),
+        }),
+      ),
+      notifyUser(trade.senderId, "trade-status-changed", { tradeId, newStatus: "COMPLETED", itemIds }),
+      notifyUser(trade.receiverId, "trade-status-changed", { tradeId, newStatus: "COMPLETED", itemIds }),
     ])
 
     /*

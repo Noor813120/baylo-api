@@ -2,7 +2,7 @@ import { NextRequest } from "next/server"
 import { z } from "zod"
 import { resolveSession } from "@/lib/api-auth"
 import prisma from "@/lib/prisma"
-import pusher from "@/lib/pusher"
+import { notifyUser } from "@/lib/realtime"
 import { releaseBridgeFee } from "@/lib/bridge-fee"
 import { leafBalances } from "@/lib/leaves"
 import { dealByAnyId, expireStaleOffers } from "@/lib/offers"
@@ -154,12 +154,13 @@ export async function POST(
   // The receiver's open offer card has to stop being actionable. Best-effort, in
   // the same shape the accept/decline path uses — a dropped realtime event means
   // a stale card until the next fetch, never a wrong database state.
-  pusher
-    .trigger(`private-user-${offer.receiverId}`, "offer-updated", {
-      offerId: offer.id,
-      status: "WITHDRAWN",
-    })
-    .catch(() => {})
+  // This handler has no try: a trigger that threw before returning a promise
+  // (which `.catch()` never saw) reached Next as a bare 500 after the withdraw
+  // was saved. notifyUser() cannot throw. See @/lib/realtime.
+  await notifyUser(offer.receiverId, "offer-updated", {
+    offerId: offer.id,
+    status: "WITHDRAWN",
+  })
 
   return ok(
     {

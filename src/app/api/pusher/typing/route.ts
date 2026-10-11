@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { resolveSession } from "@/lib/api-auth"
 import prisma from "@/lib/prisma"
-import pusher from "@/lib/pusher"
+import { notifyUser } from "@/lib/realtime"
 import { parseBody, typingSchema } from "@/lib/validation"
 import { legacyOrgRefusal, resolveInbox } from "@/lib/inbox"
 
@@ -42,7 +42,9 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 })
   }
 
-  await pusher.trigger(`private-user-${receiverId}`, "typing", {
+  // A typing indicator is decoration: a Pusher failure is logged and the
+  // answer is still a quiet success. See @/lib/realtime.
+  await notifyUser(receiverId, "typing", {
     senderId: myId,
     name: inbox.acting.organization?.name ?? session.user.name ?? "Someone",
   })

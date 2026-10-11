@@ -1,4 +1,4 @@
-import pusher from "./pusher"
+import { notifyUser } from "./realtime"
 
 /**
  * The realtime side of the meetup plan.
@@ -34,7 +34,8 @@ import pusher from "./pusher"
  * caller asked for. A Pusher outage must not turn a successful arrangement
  * into a 500 the client will retry, which would write the same plan twice and
  * re-notify. So the promise is awaited (the route should not return before
- * the trigger is at least sent) but never allowed to throw.
+ * the trigger is at least sent) but never allowed to throw -- notifyUser() in
+ * ./realtime, which every trigger in the API now goes through.
  */
 
 export const MEETUP_CHANGED_EVENT = "meetup-changed"
@@ -48,12 +49,7 @@ export type MeetupChangedPayload = {
 }
 
 export async function notifyMeetupChanged(userId: string, payload: MeetupChangedPayload): Promise<void> {
-  // try/await, not `.catch()` on the call: a trigger that throws before it
-  // returns a promise (a bad channel name, a missing key) would skip a
-  // `.catch()` chained onto it and reach the route as a 500.
-  try {
-    await pusher.trigger(`private-user-${userId}`, MEETUP_CHANGED_EVENT, payload)
-  } catch {
-    // See the header. The plan is saved; the partner's next refetch will show it.
-  }
+  // Awaited, never throws, failure logged: see ./realtime. The plan is saved;
+  // the partner's next refetch will show it.
+  await notifyUser(userId, MEETUP_CHANGED_EVENT, payload)
 }
