@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { headers } from "next/headers"
 import { resolveSession } from "@/lib/api-auth"
-import { ORG_CONTEXT_HEADER, orgPostingRefusal, resolveActingIdentity } from "@/lib/organizations"
+import { ORG_CONTEXT_HEADER, orgPostingRefusal, ownedShopPostingRefusal, resolveActingIdentity } from "@/lib/organizations"
 import { decidePerishableValue } from "@/lib/perishable"
 import { notifyCategoryMatchesAsync } from "@/lib/category-match"
 import prisma from "@/lib/prisma"
@@ -13,7 +13,7 @@ import { itemImagesCreate } from "@/lib/item-images"
 import { wantedCategoriesCreate } from "@/lib/wanted-categories"
 import { decideItemValue, reviewNotice } from "@/lib/valuation-server"
 import { visibleItemWhere } from "@/lib/blocking"
-import { enforceIdVerifiedLegacy } from "@/lib/id-verification"
+import { enforceIdVerifiedLegacy, isIdVerified } from "@/lib/id-verification"
 import {
   ITEM_PUBLIC_SELECT,
   ITEM_PUBLIC_USER_SELECT,
@@ -145,8 +145,12 @@ export async function POST(req: NextRequest) {
     //                               there is no fallback. The 403 carries the
     //                               sentence from orgPostingRefusal(), which is
     //                               the same one the phone shows up front.
-    //   as oneself                  the PERSON'S government ID, exactly as
-    //                               before, whatever state their orgs are in.
+    //   as oneself                  the PERSON'S government ID. Without one, a
+    //                               shop OWNER is refused for the SHOP's reason
+    //                               instead (16 Oct 2026): pending/rejected as
+    //                               above, or ORG_CONTEXT_REQUIRED for an
+    //                               approved shop. Never posted as the shop
+    //                               silently; see ownedShopPostingRefusal().
     //
     // The org's status comes from resolveActingIdentity() above, re-read on
     // this request, so a status change takes effect at once.
@@ -178,7 +182,17 @@ export async function POST(req: NextRequest) {
           { status: 403 },
         )
       }
-    } else {
+    } else if (!(await isIdVerified(session.user.id))) {
+      // A shop OWNER is refused for the shop's reason, never sent to the
+      // personal ID screen: an MSME verifies with its business documents. See
+      // ownedShopPostingRefusal(). Everyone else gets the ID gate as before.
+      const owned = await ownedShopPostingRefusal(prisma, session.user.id)
+      if (owned) {
+        return NextResponse.json(
+          { error: owned.message, code: owned.code, organization: owned.organization },
+          { status: 403 },
+        )
+      }
       const unverified = await enforceIdVerifiedLegacy(session.user.id, "post")
       if (unverified) return unverified
     }
