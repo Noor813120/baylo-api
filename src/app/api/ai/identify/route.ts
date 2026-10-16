@@ -14,7 +14,7 @@ if (!process.env.ANTHROPIC_API_KEY) {
 
 const anthropic = new Anthropic()
 
-const VALID_CATEGORIES = ["ELECTRONICS","CLOTHING","BAGS","BEAUTY","ACCESSORIES","FURNITURE","BOOKS","GAMING","SPORTS","BIKES","TOYS","TOOLS","MUSIC","ART","COLLECTIBLES","PETS","PLANTS","FOOD","SERVICES","OTHER"]
+const VALID_CATEGORIES = ["ELECTRONICS","CLOTHING","BAGS","BEAUTY","ACCESSORIES","FURNITURE","BOOKS","GAMING","SPORTS","BIKES","TOYS","TOOLS","MUSIC","ART","COLLECTIBLES","PETS","PLANTS","FOOD","OTHER"]
 const VALID_CONDITIONS  = ["NEW","LIKE_NEW","GOOD","FAIR","POOR"]
 
 export async function POST(req: NextRequest) {
@@ -52,7 +52,7 @@ export async function POST(req: NextRequest) {
           {
             type: "text",
             text: `Identify this item for a secondhand trade marketplace listing. Return ONLY valid JSON — no markdown, no code fences, no explanation:
-{"name":"<concise item name, max 6 words>","category":"<ELECTRONICS|CLOTHING|BAGS|BEAUTY|ACCESSORIES|FURNITURE|BOOKS|GAMING|SPORTS|BIKES|TOYS|TOOLS|MUSIC|ART|COLLECTIBLES|PETS|PLANTS|FOOD|SERVICES|OTHER>","condition":"<NEW|LIKE_NEW|GOOD|FAIR|POOR>","tags":["<tag1>","<tag2>","<tag3>"]}`,
+{"name":"<concise item name, max 6 words>","category":"<ELECTRONICS|CLOTHING|BAGS|BEAUTY|ACCESSORIES|FURNITURE|BOOKS|GAMING|SPORTS|BIKES|TOYS|TOOLS|MUSIC|ART|COLLECTIBLES|PETS|PLANTS|FOOD|OTHER>","condition":"<NEW|LIKE_NEW|GOOD|FAIR|POOR>","tags":["<tag1>","<tag2>","<tag3>"]}`,
           },
         ],
       }],

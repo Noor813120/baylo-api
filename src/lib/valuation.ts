@@ -145,7 +145,7 @@ export const CATEGORY_BANDS: Record<Category, readonly [number, number]> = {
   BIKES:        [200, 6000],  TOYS:        [20, 600],    TOOLS:     [40, 2000],
   MUSIC:        [100, 6000],  ART:         [40, 1000],   COLLECTIBLES: [20, 2000],
   PETS:         [20, 600],    PLANTS:      [20, 400],    FOOD:      [10, 100],
-  SERVICES:     [100, 2000],  OTHER:       [20, 1000],
+  OTHER:        [20, 1000],
 }
 
 /** For a category outside the enum. Should be unreachable; not a crash if not. */

@@ -82,8 +82,8 @@ export const STANDARD: Row[] = [
   ["Orchid in bloom", "PLANTS", "GOOD", 180, "Purple phalaenopsis, two spikes.", "Other flowering plants", ["PLANTS"]],
   ["Silver necklace, 925", "ACCESSORIES", "LIKE_NEW", 300, "Simple chain with pendant, with box.", "Earrings or a watch", ["ACCESSORIES"]],
   ["Makeup palette bundle", "BEAUTY", "LIKE_NEW", 200, "Eyeshadow palettes, swatched only.", "Skincare", ["BEAUTY"]],
-  ["Tutoring: high-school math, 4 sessions", "SERVICES", "NEW", 500, "Algebra, geometry and trig, one hour each, online or in Cebu City.", "Guitar lessons or books", ["SERVICES", "BOOKS"]],
-  ["Graphic design: logo package", "SERVICES", "NEW", 700, "Three concepts, two revisions, final files.", "Photography or electronics", ["SERVICES", "ELECTRONICS"]],
+  ["Tutoring: high-school math, 4 sessions", "OTHER", "NEW", 500, "Algebra, geometry and trig, one hour each, online or in Cebu City.", "Guitar lessons or books", ["BOOKS", "MUSIC"]],
+  ["Graphic design: logo package", "OTHER", "NEW", 700, "Three concepts, two revisions, final files.", "Photography or electronics", ["ELECTRONICS", "ART"]],
   ["Camping tent, 4-person", "SPORTS", "GOOD", 600, "Waterproof, poles and pegs complete.", "Sleeping bags or a cooler", ["SPORTS", "OTHER"]],
 ]
 
@@ -204,8 +204,8 @@ export const ORGS: OrgSeed[] = [
   { name: "Linis Pro Home Services", category: "SERVICES", owner: "Grace Abellana",
     description: "Home cleaning and aircon servicing team covering Metro Cebu.",
     items: [
-      ["Aircon cleaning, 1 unit", "SERVICES", "NEW", 400, "Window or split type, chemical wash, Metro Cebu.", "Cleaning supplies", ["OTHER"]],
-      ["Deep cleaning, 2-bedroom home", "SERVICES", "NEW", 900, "Four-hour team clean including kitchen and bath.", "Vacuum or equipment", ["ELECTRONICS", "TOOLS"]],
+      ["Aircon cleaning, 1 unit", "OTHER", "NEW", 400, "Window or split type, chemical wash, Metro Cebu.", "Cleaning supplies", ["OTHER"]],
+      ["Deep cleaning, 2-bedroom home", "OTHER", "NEW", 900, "Four-hour team clean including kitchen and bath.", "Vacuum or equipment", ["ELECTRONICS", "TOOLS"]],
       ["Pressure washer, used", "TOOLS", "FAIR", 700, "Replaced with a newer unit. Works, hose is patched.", "Cleaning equipment", ["TOOLS"]],
     ] },
   { name: "Ukay Finds Mandaue", category: "RETAIL", owner: "Joy Canete",

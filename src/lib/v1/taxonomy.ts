@@ -37,7 +37,6 @@ export const CATEGORY_LABELS: Record<Category, string> = {
   PETS: "Pets",
   PLANTS: "Plants",
   FOOD: "Food",
-  SERVICES: "Services",
   OTHER: "Miscellaneous",
 }
 

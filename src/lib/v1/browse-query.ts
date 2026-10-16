@@ -1,6 +1,6 @@
 import { z } from "zod"
 import { BUSINESS_CATEGORIES } from "@/app/api/v1/organizations/route"
-import { CATEGORY_VALUES, conditionSchema } from "@/lib/validation"
+import { CATEGORY_VALUES, conditionSchema, removedCategoryMessage } from "@/lib/validation"
 import { paginationShape } from "@/lib/v1/query"
 
 /**
@@ -64,7 +64,7 @@ const categoryListSchema = z
     }
     for (const c of list) {
       if (!(CATEGORY_VALUES as readonly string[]).includes(c)) {
-        ctx.addIssue({ code: "custom", message: `Unknown category: ${c}` })
+        ctx.addIssue({ code: "custom", message: removedCategoryMessage(c) ?? `Unknown category: ${c}` })
       }
     }
   })

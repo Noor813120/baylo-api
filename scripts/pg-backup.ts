@@ -321,7 +321,8 @@ function trailerCounts(sql: string): [string, number][] {
 }
 
 // Tables a MIGRATION fills with reference rows, which a dump also carries in
-// full: Category (20261008000000_category_lookup_table seeds its 20 rows). A
+// full: Category (20261008000000_category_lookup_table seeds its 20 rows; live
+// has 19 since SERVICES was removed on 16 Oct 2026, which is why the dump wins). A
 // schema built from the migrations therefore already holds them, and loading
 // the dump on top would collide on the primary key. The dump is the truth, so
 // restore and drill empty these first, in the same transaction, when the dump

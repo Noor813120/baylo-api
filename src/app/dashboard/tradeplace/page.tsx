@@ -31,7 +31,7 @@ const NOTIF_ICON: Record<string, string> = {
 const CAT_LABELS: Record<string, string> = {
   ELECTRONICS: "Electronics", CLOTHING: "Fashion", FURNITURE: "Home & Garden",
   BOOKS: "Books & Media", SPORTS: "Sports", TOYS: "Kids & Toys",
-  TOOLS: "Tools & DIY", FOOD: "Food", SERVICES: "Services", OTHER: "Other",
+  TOOLS: "Tools & DIY", FOOD: "Food", OTHER: "Other",
 }
 
 function topUserFromPairs(pairs: Array<{ senderId: string; receiverId: string }>) {
