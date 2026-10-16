@@ -233,6 +233,55 @@ export function orgPostingRefusal(
   }
 }
 
+/** The 403 code for "you own an approved shop: post as it", sent by POST /api/items. */
+export const ORG_CONTEXT_REQUIRED = "ORG_CONTEXT_REQUIRED"
+
+export interface OwnedShopPostingRefusal {
+  code: OrgPostingRefusal["code"] | typeof ORG_CONTEXT_REQUIRED
+  message: string
+  organization: { id: string; name: string; verificationStatus: OrgVerificationStatus; rejectionReason: OrgRejectionReason | null }
+}
+
+/**
+ * Why a shop OWNER without a verified personal ID may not post as themselves
+ * (16 Oct 2026), or null when they own no shop.
+ *
+ * ── AN MSME VERIFIES WITH ITS BUSINESS, NEVER WITH A PERSONAL ID ───────────
+ *
+ * Without the org header, POST /api/items used to answer every unverified
+ * person with the personal ID gate -- so an MSME owner whose shop was in
+ * review, or who had simply signed in again (sign-out clears the phone's
+ * acting context), was told to verify a government ID they will never need.
+ * The owner's refusal is now the SHOP's:
+ *
+ *   PENDING / REJECTED  the same refusal as posting AS the shop, from
+ *                       orgPostingRefusal(), so the sentence matches.
+ *   VERIFIED            ORG_CONTEXT_REQUIRED: post as the shop. Never done
+ *                       silently -- switching the author also switches the
+ *                       tier cap and the issuance rules, so the client asks.
+ *
+ * Called only for a person whose personal ID is NOT verified. One who has one
+ * may still post as themselves, whatever their shop's state.
+ */
+export async function ownedShopPostingRefusal(
+  db: Pick<PrismaClient, "organization">,
+  userId: string,
+): Promise<OwnedShopPostingRefusal | null> {
+  const org = await db.organization.findFirst({
+    where: { ownerId: userId },
+    select: { id: true, name: true, verificationStatus: true, rejectionReason: true },
+    orderBy: { createdAt: "asc" },
+  })
+  if (!org) return null
+  const status = org.verificationStatus as OrgVerificationStatus
+  const refusal = orgPostingRefusal(status, org.rejectionReason)
+  return {
+    code: refusal?.code ?? ORG_CONTEXT_REQUIRED,
+    message: refusal?.message ?? `Post as ${org.name}. Your shop is approved, so its listings go out under the shop's name.`,
+    organization: { id: org.id, name: org.name, verificationStatus: status, rejectionReason: refusal?.rejectionReason ?? null },
+  }
+}
+
 // ── Acting as an organisation ────────────────────────────────────────────────
 
 /**

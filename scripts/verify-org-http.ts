@@ -378,6 +378,20 @@ async function main() {
       pendingIdless.status === 403 && pendingIdless.body.code === "ORG_VERIFICATION_PENDING",
       `status ${pendingIdless.status} code ${String(pendingIdless.body.code)}`,
     )
+    // fix/msme-post-gate (16 Oct 2026): an ID-less OWNER of a pending shop,
+    // posting with no header, gets the SHOP's refusal, not the personal ID gate.
+    const pendingIdlessSelf = await call("/api/items", {
+      token: idlessToken,
+      method: "POST",
+      body: { ...listing, title: `${tag} pending-org idless self` },
+    })
+    check(
+      "PENDING org: its ID-less owner posting as themselves gets ORG_VERIFICATION_PENDING, not the ID gate",
+      pendingIdlessSelf.status === 403 &&
+        pendingIdlessSelf.body.code === "ORG_VERIFICATION_PENDING" &&
+        (pendingIdlessSelf.body.organization as { id?: string } | undefined)?.id === reviewOrg.organizationId,
+      `status ${pendingIdlessSelf.status} code ${String(pendingIdlessSelf.body.code)}`,
+    )
     // v2: the owner checks below need the owner to own it again.
     await prisma.organization.update({ where: { id: reviewOrg.organizationId }, data: { ownerId: owner.id } })
     const pendingVerifiedPerson = await call("/api/items", {
@@ -547,10 +561,33 @@ async function main() {
       method: "POST",
       body: { ...listing, title: `${tag} idless self` },
     })
+    // fix/msme-post-gate: an ID-less owner of an APPROVED shop is told to post
+    // as the shop (ORG_CONTEXT_REQUIRED), and nothing is posted silently.
     check(
-      "but posting AS THEMSELVES still needs their own ID",
-      idlessSelfPost.status === 403 && idlessSelfPost.body.code === "ID_VERIFICATION_REQUIRED",
-      `status ${idlessSelfPost.status}`,
+      "posting AS THEMSELVES, the ID-less owner of a verified shop gets ORG_CONTEXT_REQUIRED",
+      idlessSelfPost.status === 403 &&
+        idlessSelfPost.body.code === "ORG_CONTEXT_REQUIRED" &&
+        (idlessSelfPost.body.organization as { id?: string } | undefined)?.id === reviewOrg.organizationId,
+      `status ${idlessSelfPost.status} code ${String(idlessSelfPost.body.code)}`,
+    )
+    const shopsAfterRefusal = await prisma.item.count({ where: { title: `${tag} idless self` } })
+    check("and no listing was created under any author", shopsAfterRefusal === 0, `count=${shopsAfterRefusal}`)
+
+    // Somebody with no shop and no ID: the personal ID gate, unchanged.
+    const plain = await prisma.user.create({
+      data: { name: `${tag}-plain`, email: `${tag}-plain@test.invalid`, isVerified: true },
+      select: { id: true },
+    })
+    created.users.push(plain.id)
+    const plainPost = await call("/api/items", {
+      token: await signAccessToken(plain.id),
+      method: "POST",
+      body: { ...listing, title: `${tag} plain self` },
+    })
+    check(
+      "a person with no shop and no ID still gets ID_VERIFICATION_REQUIRED",
+      plainPost.status === 403 && plainPost.body.code === "ID_VERIFICATION_REQUIRED",
+      `status ${plainPost.status} code ${String(plainPost.body.code)}`,
     )
 
     const meAfter = await call("/api/v1/profile/me", { token: idlessToken })
