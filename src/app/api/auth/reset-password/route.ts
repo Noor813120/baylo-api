@@ -18,8 +18,13 @@ export async function POST(req: NextRequest) {
   // looked up; a hash of any other token type is not a reset link.
   const record = await prisma.authToken.findUnique({ where: { tokenHash: hashResetToken(token) } })
 
-  if (!record || record.type !== "PASSWORD_RESET" || record.expiresAt < new Date()) {
-    return NextResponse.json({ error: "Reset link is invalid or has expired" }, { status: 400 })
+  // `code` lets the reset page say which it was. Both stay 400, and the
+  // message is the same for both, as before.
+  if (!record || record.type !== "PASSWORD_RESET") {
+    return NextResponse.json({ error: "Reset link is invalid or has expired", code: "INVALID_TOKEN" }, { status: 400 })
+  }
+  if (record.expiresAt < new Date()) {
+    return NextResponse.json({ error: "Reset link is invalid or has expired", code: "EXPIRED_TOKEN" }, { status: 400 })
   }
 
   const hashed = await bcrypt.hash(password, 12)

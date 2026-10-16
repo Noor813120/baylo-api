@@ -16,13 +16,10 @@ import { parseBody, verifyEmailSchema } from "@/lib/validation"
  * The GET/POST exports below are what prove it: the catch-all's handlers are
  * never invoked for this path.
  *
- * Two transports, one code path:
- *   GET  ?token=…  the link in the email, opened in a browser.
- *   POST { token } the native client, which cannot follow a web link cleanly —
- *                  it captures the token from a deep link or a paste and sends
- *                  it as JSON.
- * Both call consumeVerificationToken(), so there is exactly one place where a
- * token is validated and spent.
+ * One transport spends a token, and it is POST { token }: the confirm page's
+ * button (app/auth/verify-email) and the native client both send it. GET only
+ * forwards to the page — see GET below for why. consumeVerificationToken() is
+ * the one place a token is validated and spent.
  */
 
 const REASON_STATUS: Record<"invalid" | "expired", number> = {
@@ -64,35 +61,41 @@ function jsonResult(result: ConsumeResult): NextResponse {
   })
 }
 
-/** The link in the email. */
+/**
+ * A verification link, opened. NEVER spends the token.
+ *
+ * Links mailed before 17 Oct 2026 point here rather than at the confirm page,
+ * and anything can GET a URL: mail scanners pre-open every link in a message,
+ * and link previews fetch them too. If a GET redeemed the token, those would
+ * verify the account and burn the link before the person saw it. So a GET of
+ * any kind — browser, scanner, curl — is sent on to the confirm page with the
+ * token intact, and only the POST below (the page's button, or the app)
+ * redeems it.
+ */
 export async function GET(req: NextRequest) {
   const token = req.nextUrl.searchParams.get("token") ?? ""
-  const parsed = verifyEmailSchema.safeParse({ token })
-
-  const result: ConsumeResult = parsed.success
-    ? await consumeVerificationToken(parsed.data.token)
-    : { ok: false, reason: "invalid" }
-
-  // A browser followed a link and expects a page, not a JSON blob. Anything
-  // else — curl, the native client, a health check — gets the JSON. The Accept
-  // header is what distinguishes them, and getting it wrong is cosmetic in
-  // both directions: the token is already spent by this point either way.
-  const wantsHtml = (req.headers.get("accept") ?? "").includes("text/html")
-  if (wantsHtml) {
-    const base = publicBaseUrl(req)
-    const target = result.ok
-      ? new URL("/auth/verify-email?status=success", base)
-      : new URL(`/auth/verify-email?status=error&reason=${result.reason}`, base)
-    return NextResponse.redirect(target)
-  }
-
-  return jsonResult(result)
+  const target = new URL("/auth/verify-email", publicBaseUrl(req) || req.url)
+  if (verifyEmailSchema.safeParse({ token }).success) target.searchParams.set("token", token)
+  return NextResponse.redirect(target, 303)
 }
 
-/** The native client's transport for the same token. */
+/**
+ * Redeems a token: the confirm page's button, and the native client.
+ *
+ * A failure inside redemption answers a typed 500 rather than Next's HTML
+ * error page, so the confirm page can say "try again" instead of guessing.
+ */
 export async function POST(req: NextRequest) {
   const parsed = await parseBody(req, verifyEmailSchema)
   if (!parsed.ok) return parsed.response
 
-  return jsonResult(await consumeVerificationToken(parsed.data.token))
+  try {
+    return jsonResult(await consumeVerificationToken(parsed.data.token))
+  } catch (err) {
+    console.error("[verify-email]", err instanceof Error ? err.message : "unknown error")
+    return NextResponse.json(
+      { error: "Could not check that link just now", code: "SERVER_ERROR" },
+      { status: 500 },
+    )
+  }
 }

@@ -100,7 +100,9 @@ function linkFor(to: string): string | null {
     if (inbox[i].to !== to) continue
     // Quoted-printable soft line breaks split long URLs across lines.
     const decoded = inbox[i].body.replace(/=\r\n/g, "").replace(/=3D/g, "=")
-    const match = /https?:\/\/[^\s"'<>]*\/api\/auth\/verify-email\?token=[A-Za-z0-9]+/.exec(decoded)
+    // Since 17 Oct 2026 the link is the confirm PAGE (/auth/verify-email), not
+    // the API route: opening it spends nothing; the page's button POSTs.
+    const match = /https?:\/\/[^\s"'<>]*\/auth\/verify-email\?token=[A-Za-z0-9]+/.exec(decoded)
     if (match) return match[0]
   }
   return null
@@ -204,10 +206,12 @@ async function main() {
   // are ones it cannot produce, so getting them proves the static segments win.
   console.log("\n[1] routing — real static segments, not the NextAuth catch-all")
 
+  // GET never redeems: it forwards to the confirm page with the token intact,
+  // whatever the Accept header says. The catch-all would answer a bare 400.
   const bogus = await req("/api/auth/verify-email?token=deadbeef", { headers: jsonHeaders })
-  check("GET verify-email reaches our handler (400 + INVALID_TOKEN)",
-    bogus.status === 400 && bogus.json.code === "INVALID_TOKEN",
-    `status=${bogus.status} body=${JSON.stringify(bogus.json)}`)
+  check("GET verify-email reaches our handler (303 to the confirm page)",
+    bogus.status === 303 && /\/auth\/verify-email\?token=deadbeef$/.test(bogus.location ?? ""),
+    `status=${bogus.status} location=${bogus.location}`)
 
   const badBody = await req("/api/auth/verify-email", {
     method: "POST", headers: jsonHeaders, body: "{}",
@@ -258,10 +262,27 @@ async function main() {
   // ── 3. Verify ──────────────────────────────────────────────────────────────
   console.log("\n[3] verifying credits exactly the grant plus VERIFY_ACCOUNT")
 
-  const path = linkA.slice(new URL(linkA).origin.length)
-  const verified = await req(path, { headers: jsonHeaders })
+  // Opening the link must verify NOTHING — mail scanners open every link in a
+  // message. Neither the emailed page URL nor the legacy API URL may spend it.
+  const pagePath = linkA.slice(new URL(linkA).origin.length)
+  check("the emailed link is the confirm page, not the API",
+    pagePath.startsWith("/auth/verify-email?token="), pagePath)
+  const opened = await fetch(`${BASE}${pagePath}`, { headers: { accept: "text/html" }, redirect: "manual" })
+  check("opening the link serves the confirm page (200)", opened.status === 200, `status=${opened.status}`)
+  const legacyOpen = await req(`/api/auth/verify-email?token=${rawA}`, { headers: { accept: "*/*" } })
+  check("GET of the legacy API link only redirects (303)", legacyOpen.status === 303,
+    `status=${legacyOpen.status}`)
+  const snapOpened = await snapshot(userA.id)
+  check("after opening, still unverified with the token unspent",
+    !snapOpened.isVerified && snapOpened.tokens === 1 && snapOpened.txs.length === 0,
+    `isVerified=${snapOpened.isVerified} tokens=${snapOpened.tokens} rows=${snapOpened.txs.length}`)
+
+  const confirmA = () => req("/api/auth/verify-email", {
+    method: "POST", headers: jsonHeaders, body: JSON.stringify({ token: rawA }),
+  })
+  const verified = await confirmA()
   const expected = SIGNUP_GRANT_LEAVES + TASK_REWARDS.VERIFY_ACCOUNT
-  check("GET the link returns 200", verified.status === 200, JSON.stringify(verified.json))
+  check("POST (the Confirm button) returns 200", verified.status === 200, JSON.stringify(verified.json))
   check("reported as a first-time verification", verified.json.alreadyVerified === false)
   check(`reported ${expected} Leaves awarded`, verified.json.leavesAwarded === expected,
     `got ${verified.json.leavesAwarded}`)
@@ -298,7 +319,7 @@ async function main() {
   // ── 4. Verifying twice credits nothing ─────────────────────────────────────
   console.log("\n[4] verifying twice credits nothing")
 
-  const replay = await req(path, { headers: jsonHeaders })
+  const replay = await confirmA()
   check("the spent link is refused", replay.status === 400 && replay.json.code === "INVALID_TOKEN",
     `status=${replay.status} body=${JSON.stringify(replay.json)}`)
 
@@ -342,8 +363,11 @@ async function main() {
     data: { expiresAt: new Date(Date.now() - 60_000) },
   })
 
-  const expiredGet = await req(linkB.slice(new URL(linkB).origin.length), { headers: jsonHeaders })
-  check("GET with an expired token is refused",
+  const expiredGet = await req("/api/auth/verify-email", {
+    method: "POST", headers: jsonHeaders,
+    body: JSON.stringify({ token: new URL(linkB).searchParams.get("token") }),
+  })
+  check("POST with an expired token is refused",
     expiredGet.status === 400 && expiredGet.json.code === "EXPIRED_TOKEN",
     `status=${expiredGet.status} body=${JSON.stringify(expiredGet.json)}`)
 

@@ -72,7 +72,13 @@ export async function issueVerificationToken(user: {
   })
 
   // The raw token exists only here and in the email. Nothing writes it to a log.
-  const verifyUrl = `${baseUrl}/api/auth/verify-email?token=${raw}`
+  //
+  // The link opens the confirm PAGE, not the API. Opening it spends nothing:
+  // the page shows a "Confirm my email" button and only that button's POST
+  // redeems the token. Mail scanners that pre-open every link in a message
+  // (Outlook Safe Links and friends) would otherwise verify the account — and
+  // burn the link — before the person ever saw it.
+  const verifyUrl = `${baseUrl}/auth/verify-email?token=${raw}`
 
   try {
     await sendVerificationEmail(user.email, verifyUrl, user.name)

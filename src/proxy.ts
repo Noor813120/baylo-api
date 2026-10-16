@@ -25,6 +25,9 @@ const { auth } = NextAuth(authConfig)
  */
 const RETIRED_FOR_USERS = ["/dashboard", "/listings", "/post", "/profile", "/trust"]
 
+/** Exact paths. Where the verification and password-reset emails link to. */
+const EMAIL_LANDINGS = ["/auth/verify-email", "/auth/reset-password"]
+
 const isRetired = (pathname: string) =>
   RETIRED_FOR_USERS.some((p) => pathname === p || pathname.startsWith(`${p}/`))
 
@@ -39,7 +42,10 @@ export default auth(function proxy(req) {
   const isStaff = role === "ADMIN"
   const home = isStaff ? "/dashboard" : "/android"
 
-  if (isLoggedIn && (pathname === "/" || pathname.startsWith("/auth/"))) {
+  // The two pages emailed links land on stay open to a signed-in session. A
+  // link opened in a browser that happens to hold a web session — an admin
+  // testing their own signup — must still show its result, not bounce.
+  if (isLoggedIn && (pathname === "/" || (pathname.startsWith("/auth/") && !EMAIL_LANDINGS.includes(pathname)))) {
     return NextResponse.redirect(new URL(home, req.url))
   }
 
