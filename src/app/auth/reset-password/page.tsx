@@ -65,7 +65,7 @@ function ResetContent() {
   const [confirm, setConfirm] = useState("")
   const [show, setShow] = useState(false)
 
-  async function save(e?: React.FormEvent) {
+  async function save(e?: { preventDefault(): void }) {
     e?.preventDefault()
     if (password.length < 8) return setState({ kind: "form", error: "Use at least 8 characters." })
     if (password !== confirm) return setState({ kind: "form", error: "The two passwords don't match." })

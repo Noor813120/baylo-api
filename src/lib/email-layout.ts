@@ -22,8 +22,8 @@
  * inside the first <img>, and refuses `data:` images anyway — a Gmail user saw
  * a broken header, no button and a bare URL. So:
  *
- *   - NO inlined images, ever. The logo is a hosted image (EMAIL_LOGO_URL,
- *     http(s) only) and the wordmark beside it is TEXT, so the header still
+ *   - NO inlined images, ever. The logo is a hosted image (Cloudinary by
+ *     default, EMAIL_LOGO_URL to override, http(s) only) and the wordmark beside it is TEXT, so the header still
  *     reads "Baylo" with images blocked. The logo must be on a PUBLIC host:
  *     Gmail fetches images through its own proxy, which cannot reach a LAN
  *     address, so a logo served from the dev laptop never loads in Gmail.
@@ -77,10 +77,21 @@ export function contactAddress(): string {
   return (process.env.EMAIL_CONTACT ?? "").trim() || "bayloplatform@gmail.com"
 }
 
-/** A hosted logo, or nothing. Never a data URI — see the note at the top. */
-function hostedLogo(): string | null {
+/**
+ * The project logo, uploaded once to Baylo's Cloudinary (a public delivery URL,
+ * not a credential). public/email/baylo-leaf-96.png is the source file.
+ */
+export const DEFAULT_EMAIL_LOGO_URL =
+  "https://res.cloudinary.com/dm7ctbxq7/image/upload/v1792168950/baylo/email/baylo-leaf-96.png"
+
+/**
+ * The logo to show: EMAIL_LOGO_URL when it is an http(s) URL, else the default.
+ * Anything else in the variable (a data URI, a file path) is ignored — see the
+ * note at the top. The wordmark beside it is text either way.
+ */
+function hostedLogo(): string {
   const configured = (process.env.EMAIL_LOGO_URL ?? "").trim()
-  return /^https?:\/\//i.test(configured) ? configured : null
+  return /^https?:\/\//i.test(configured) ? configured : DEFAULT_EMAIL_LOGO_URL
 }
 
 /**
@@ -155,9 +166,7 @@ export type EmailContent = {
 export function renderEmailHtml(m: EmailContent): string {
   const logo = hostedLogo()
   const contact = escapeHtml(contactAddress())
-  const logoCell = logo
-    ? `<td style="padding-right:10px;vertical-align:middle;"><img src="${escapeHtml(logo)}" width="36" height="36" alt="Baylo" style="display:block;width:36px;height:36px;border:0;border-radius:9px;${SANS_FONT}font-size:12px;font-weight:700;color:${C.forest};"></td>`
-    : ""
+  const logoCell = `<td style="padding-right:10px;vertical-align:middle;"><img src="${escapeHtml(logo)}" width="36" height="36" alt="Baylo" style="display:block;width:36px;height:36px;border:0;border-radius:9px;${SANS_FONT}font-size:12px;font-weight:700;color:${C.forest};"></td>`
 
   return `<!DOCTYPE html>
 <html lang="en">
