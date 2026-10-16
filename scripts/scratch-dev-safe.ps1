@@ -24,6 +24,10 @@
   # Pusher with NO secret at all: trigger() throws synchronously instead of
   # rejecting. scripts/verify-pusher-safe.ts runs once in each mode.
   .\scripts\scratch-dev-safe.ps1 -Name scratch_pusher -Port 3001 -PusherSecret unset
+.EXAMPLE
+  # A phone test that uploads photos and a business document (real Cloudinary;
+  # Pusher and email still disarmed). Delete the uploads afterwards.
+  .\scripts\scratch-dev-safe.ps1 -Name scratch_http -Port 3001 -NoPush -RealCloudinary
 #>
 param(
   [Parameter(Mandatory = $true)] [string] $Name,
@@ -38,6 +42,13 @@ param(
   # of a live user: events go to private-user-<id> channels of scratch rows.
   # Every OTHER disarm below still applies.
   [ValidateSet("invalid-scratch", "unset", "real")] [string] $PusherSecret = "invalid-scratch",
+  # The REAL Cloudinary secret from .env, for a phone test that has to upload:
+  # the post wizard cannot pass its photo step, and the business form cannot
+  # submit, without it (17 Oct 2026). Opt-in only. Pusher and email stay
+  # disarmed. What it costs: listing photos and business documents from the
+  # test go to the real Cloudinary account and must be deleted afterwards
+  # (a document is destroyed when the shop is decided; listing photos are not).
+  [switch] $RealCloudinary,
   [string] $ProjectDir = "D:\BAYLO\baylo"
 )
 
@@ -117,6 +128,11 @@ try {
     [Environment]::SetEnvironmentVariable("PUSHER_SECRET", [NullString]::Value, "Process")
     if ([Environment]::GetEnvironmentVariables("Process").Contains("PUSHER_SECRET")) { Refuse "could not delete PUSHER_SECRET for -PusherSecret real." }
   }
+  # Same deletion, same reason (Next never overrides a variable already set).
+  if ($RealCloudinary) {
+    [Environment]::SetEnvironmentVariable("CLOUDINARY_API_SECRET", [NullString]::Value, "Process")
+    if ([Environment]::GetEnvironmentVariables("Process").Contains("CLOUDINARY_API_SECRET")) { Refuse "could not delete CLOUDINARY_API_SECRET for -RealCloudinary." }
+  }
   if ([Environment]::GetEnvironmentVariable("DATABASE_POOL_URL", "Process")) { Refuse "could not clear DATABASE_POOL_URL." }
 
   Write-Host ""
@@ -125,6 +141,10 @@ try {
   Write-Host "  port          : $Port"
   foreach ($k in $fake.Keys) {
     if ($k -eq "PUSHER_SECRET" -and $PusherSecret -eq "real") { continue }  # shown below
+    if ($k -eq "CLOUDINARY_API_SECRET" -and $RealCloudinary) {
+      Write-Host ("  {0,-21} : {1}" -f $k, "REAL (cleared here; Next reads .env) -- uploads reach Cloudinary; delete them afterwards") -ForegroundColor Yellow
+      continue
+    }
     $v = [Environment]::GetEnvironmentVariable($k, "Process")
     Write-Host ("  {0,-21} : {1}" -f $k, $(if ($v) { $v } else { "<cleared>" }))
   }
