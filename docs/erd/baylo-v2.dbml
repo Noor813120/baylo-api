@@ -191,7 +191,7 @@ Table "Category" {
   "label" text [not null, unique, note: 'display name, e.g. Electronics']
   "sortOrder" smallint [not null, unique, note: 'display order (the old enum order)']
 
-  Note: '''Lookup table of listing categories (20 rows, seeded by the migration). Replaced enum Category on 8 Oct 2026. Referenced by Item.categoryId (what a listing is) and ItemWantedCategory.categoryId (what its owner wants).'''
+  Note: '''Lookup table of listing categories (19 rows: the migration seeded 20, SERVICES was removed as data on 16 Oct 2026 and OTHER renumbered to 19). Replaced enum Category on 8 Oct 2026. Referenced by Item.categoryId (what a listing is) and ItemWantedCategory.categoryId (what its owner wants).'''
 }
 
 // ===================== Trading =====================

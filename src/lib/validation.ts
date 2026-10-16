@@ -46,7 +46,7 @@ const MAX_LOOKING_FOR = 6
 export const CATEGORY_VALUES = [
   "ELECTRONICS", "CLOTHING", "BAGS", "BEAUTY", "ACCESSORIES", "FURNITURE",
   "BOOKS", "GAMING", "SPORTS", "BIKES", "TOYS", "TOOLS", "MUSIC", "ART",
-  "COLLECTIBLES", "PETS", "PLANTS", "FOOD", "SERVICES", "OTHER",
+  "COLLECTIBLES", "PETS", "PLANTS", "FOOD", "OTHER",
 ] as const
 
 export const CONDITION_VALUES = ["NEW", "LIKE_NEW", "GOOD", "FAIR", "POOR"] as const
@@ -56,7 +56,24 @@ export const CONDITION_VALUES = ["NEW", "LIKE_NEW", "GOOD", "FAIR", "POOR"] as c
  * behind an `as never`, which silences the compiler without checking anything —
  * an invalid value reached the database driver.
  */
-export const categorySchema = z.enum(CATEGORY_VALUES)
+export const categorySchema = z.enum(CATEGORY_VALUES, {
+  error: (issue) => removedCategoryMessage(issue.input) ?? undefined,
+})
+
+/**
+ * Category codes that were withdrawn, with their listings moved to OTHER and
+ * their Category rows deleted on live (SERVICES, 16 Oct 2026, by
+ * scripts/apply-remove-services.ts). Kept by name so an app built before the
+ * removal is told WHY its pick was refused rather than "invalid option": a 400
+ * with a sentence, never a 500 from the foreign key.
+ */
+export const REMOVED_CATEGORY_IDS = ["SERVICES"] as const
+
+export function removedCategoryMessage(input: unknown): string | null {
+  return (REMOVED_CATEGORY_IDS as readonly unknown[]).includes(input)
+    ? "Services is no longer a category. Pick Miscellaneous or another category."
+    : null
+}
 export const conditionSchema = z.enum(CONDITION_VALUES)
 
 /**

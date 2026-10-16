@@ -1,4 +1,5 @@
-// Put the 20 Category rows into a schema built by `prisma db push`.
+// Put the 19 Category rows into a schema built by `prisma db push` (and remove
+// withdrawn codes, see prisma/category-seed.ts).
 //
 //   DATABASE_URL=...?schema=scratch_x npx tsx --env-file=.env scripts/seed-categories.ts
 //

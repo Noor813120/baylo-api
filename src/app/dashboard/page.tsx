@@ -45,7 +45,6 @@ const CATEGORY_LABEL: Record<string, string> = {
   TOYS: "Kids & Toys",
   TOOLS: "Tools & DIY",
   FOOD: "Food",
-  SERVICES: "Services",
   OTHER: "Other",
 }
 
@@ -58,7 +57,6 @@ const CATEGORY_HASHTAG: Record<string, string> = {
   TOYS:        "#KidsToys",
   TOOLS:       "#ToolsDIY",
   FOOD:        "#Food",
-  SERVICES:    "#Services",
   OTHER:       "#Miscellaneous",
 }
 

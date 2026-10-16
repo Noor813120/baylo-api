@@ -174,7 +174,7 @@ const CATEGORY_DEFS = [
 const CATEGORY_LABEL_MAP: Record<string, string> = {
   ELECTRONICS: "Electronics", CLOTHING: "Fashion", FURNITURE: "Home & Garden",
   BOOKS: "Books & Media", SPORTS: "Sports", TOYS: "Kids & Toys",
-  TOOLS: "Tools & DIY", FOOD: "Food", SERVICES: "Services", OTHER: "Other",
+  TOOLS: "Tools & DIY", FOOD: "Food", OTHER: "Other",
 };
 
 function fmtCondition(c: string): string {

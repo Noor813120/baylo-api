@@ -87,7 +87,7 @@ console.log("structured output schema (what the API is sent)")
 
 console.log("system prompt")
 {
-  check("names all 20 categories", (ASSISTANT_SYSTEM_PROMPT.match(/^[A-Z_]+ = /gm) ?? []).length >= 20 + 11)
+  check("names all 19 categories and 11 shop types", (ASSISTANT_SYSTEM_PROMPT.match(/^[A-Z_]+ = /gm) ?? []).length >= 19 + 11)
   check("has the real bracket edges", ASSISTANT_SYSTEM_PROMPT.includes("1: up to 100") && ASSISTANT_SYSTEM_PROMPT.includes("10: above 12000"))
   check("no volatile content (date/time)", !/20\d\d-\d\d-\d\d/.test(ASSISTANT_SYSTEM_PROMPT))
   // ~4 chars per token for English prose; the real count comes from the API.

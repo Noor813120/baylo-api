@@ -29,7 +29,6 @@ const CATEGORIES = [
   { value: "PETS",         label: "Pets & Animals" },
   { value: "PLANTS",       label: "Plants & Garden" },
   { value: "FOOD",         label: "Food & Drinks" },
-  { value: "SERVICES",     label: "Services & Skills" },
   { value: "OTHER",        label: "Other" },
 ];
 const CONDITIONS = [

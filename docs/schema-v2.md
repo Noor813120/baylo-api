@@ -420,14 +420,16 @@ Both depend on the trade migration. `build-scratch.ts --skip trade` skips them t
 **After.**
 
 ```
-Category(id PK, label UNIQUE, sortOrder UNIQUE)            -- 20 rows, seeded from the enum
+Category(id PK, label UNIQUE, sortOrder UNIQUE)            -- 19 rows (20 seeded from the enum; SERVICES removed 16 Oct 2026)
 Item.categoryId                  -> Category.id            -- NOT NULL, ON DELETE RESTRICT
 ItemWantedCategory(itemId     -> Item      ON DELETE CASCADE,
                    categoryId -> Category  ON DELETE RESTRICT,
                    PK (itemId, categoryId))
 ```
 
-Item ↔ ItemWantedCategory ↔ Category is now a many-to-many through a junction table, and Item → Category is one-to-many. The number of ItemWantedCategory rows did not change: one row per item per wanted category is already the 1NF form; only the column became a foreign key.
+Item ↔ ItemWantedCategory ↔ Category is now a many-to-many through a junction table, and Item → Category is one-to-many.
+
+**SERVICES removed (16 Oct 2026).** A data change, not a schema change (the freeze): `scripts/apply-remove-services.ts` moved SERVICES listings to OTHER (Miscellaneous), deleted the SERVICES ItemWantedCategory rows, deleted the SERVICES Category row and renumbered OTHER from 20 to 19, in one guarded transaction with an exact reverse. The migration `20261008000000_category_lookup_table` still seeds all 20 rows and is not edited, so a database built from migrations ALONE starts with SERVICES; one restored from a dump does not (pg-backup clears the seeded rows and loads the dump's). `BusinessCategory.SERVICES` (a kind of SHOP) is a separate enum and stays. The number of ItemWantedCategory rows did not change: one row per item per wanted category is already the 1NF form; only the column became a foreign key.
 
 **Design decisions.**
 

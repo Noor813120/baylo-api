@@ -5,8 +5,10 @@
 //
 // The API sends CATEGORY_LABELS from src/lib/v1/taxonomy.ts, and the Category
 // table holds a label too. Two copies can drift, so this fails if they do:
-//   STATIC  CATEGORY_SEED (taxonomy + validation) == the rows the migration
-//           hard-codes == the enum the rollback file recreates, in order.
+//   STATIC  CATEGORY_SEED (taxonomy + validation, 19 since SERVICES was
+//           removed on 16 Oct 2026) == the rows the migration hard-codes and
+//           the enum the rollback file recreates, each minus the removed
+//           codes, in order.
 //   DB      READ-ONLY. The Category rows in the target schema == CATEGORY_SEED;
 //           the enum is gone; Item and ItemWantedCategory reference only known
 //           codes; the foreign keys and RESTRICT are in place.
@@ -14,6 +16,8 @@ import "dotenv/config"
 import { Client } from "pg"
 import { readFileSync } from "node:fs"
 import { CATEGORY_SEED } from "../prisma/category-seed"
+import { REMOVED_CATEGORY_IDS, categorySchema, createItemSchema, updateItemSchema } from "../src/lib/validation"
+import { browseQuerySchema } from "../src/lib/v1/browse-query"
 import { targetSchema } from "./lib/live-guard"
 
 const MIGRATION = "20261008000000_category_lookup_table"
@@ -27,18 +31,45 @@ const want = CATEGORY_SEED.map((c) => `${c.id}|${c.label}|${c.sortOrder}`)
 
 function staticChecks() {
   console.log("\n  static")
-  check(CATEGORY_SEED.length === 20, "20 categories in CATEGORY_VALUES", String(CATEGORY_SEED.length))
+  check(CATEGORY_SEED.length === 19, "19 categories in CATEGORY_VALUES (SERVICES removed 16 Oct 2026)", String(CATEGORY_SEED.length))
+  check(CATEGORY_SEED.every((c) => !(REMOVED_CATEGORY_IDS as readonly string[]).includes(c.id)), "no removed code is still in CATEGORY_VALUES", REMOVED_CATEGORY_IDS.join(","))
   check(CATEGORY_SEED.every((c) => typeof c.label === "string" && c.label.length > 0), "every code has a label in CATEGORY_LABELS")
   check(new Set(CATEGORY_SEED.map((c) => c.label)).size === CATEGORY_SEED.length, "labels are unique (Category_label_key)")
 
+  // The applied migration still seeds the original 20 and is never edited.
+  // What has to hold is that ITS rows, with the removal applied the way
+  // apply-remove-services.ts applies it (drop the code, renumber by position),
+  // are exactly the taxonomy.
   const fwd = read(`prisma/migrations/${MIGRATION}/migration.sql`)
-  const rows = [...fwd.matchAll(/\('([A-Z_]+)', '((?:[^']|'')*)', (\d+)\)/g)].map((m) => `${m[1]}|${m[2].replace(/''/g, "'")}|${m[3]}`)
+  const seeded = [...fwd.matchAll(/\('([A-Z_]+)', '((?:[^']|'')*)', (\d+)\)/g)]
+  check(seeded.length === 20, "the migration still seeds its original 20 rows", String(seeded.length))
+  const rows = seeded
+    .filter((m) => !(REMOVED_CATEGORY_IDS as readonly string[]).includes(m[1]))
+    .map((m, i) => `${m[1]}|${m[2].replace(/''/g, "'")}|${i + 1}`)
   const diff = want.filter((w, i) => rows[i] !== w)
-  check(rows.length === want.length && diff.length === 0, "migration seed rows == taxonomy (code, label, order)", diff.length ? `differs at ${diff.join(", ")}` : `${rows.length} rows`)
+  check(rows.length === want.length && diff.length === 0, "migration seed rows minus removals == taxonomy (code, label, order)", diff.length ? `differs at ${diff.join(", ")}` : `${rows.length} rows`)
 
   const back = read(`prisma/rollback/${MIGRATION}.sql`)
   const enumList = (/CREATE TYPE "Category_restore" AS ENUM \(([\s\S]*?)\);/.exec(back)?.[1] ?? "").match(/'([A-Z_]+)'/g)?.map((s) => s.slice(1, -1)) ?? []
-  check(JSON.stringify(enumList) === JSON.stringify(CATEGORY_SEED.map((c) => c.id)), "rollback enum == CATEGORY_VALUES, same order", enumList.join(","))
+  const enumKept = enumList.filter((c) => !(REMOVED_CATEGORY_IDS as readonly string[]).includes(c))
+  check(JSON.stringify(enumKept) === JSON.stringify(CATEGORY_SEED.map((c) => c.id)), "rollback enum minus removals == CATEGORY_VALUES, same order", enumList.join(","))
+
+  // An app built before the removal still offers SERVICES. Every write path
+  // validates with these schemas BEFORE the database is reached, so the answer
+  // is a 400 carrying this sentence, never the foreign key's 500.
+  const removedMsg = "Services is no longer a category. Pick Miscellaneous or another category."
+  const base = { title: "x", description: "x", condition: "NEW", images: [] }
+  const create = createItemSchema.safeParse({ ...base, category: "SERVICES" })
+  check(!create.success && create.error.issues.some((i) => i.path.join(".") === "category" && i.message === removedMsg), "POST /api/items category SERVICES -> 400 with the removal sentence", create.success ? "accepted" : create.error.issues[0]?.message)
+  const wanted = createItemSchema.safeParse({ ...base, category: "OTHER", lookingForCategories: ["BOOKS", "SERVICES"] })
+  check(!wanted.success && wanted.error.issues.some((i) => i.message === removedMsg), "lookingForCategories with SERVICES -> 400 with the removal sentence", wanted.success ? "accepted" : wanted.error.issues[0]?.message)
+  const patch = updateItemSchema.safeParse({ category: "SERVICES" })
+  check(!patch.success && patch.error.issues.some((i) => i.message === removedMsg), "PATCH /api/items/[id] category SERVICES -> 400 with the removal sentence", patch.success ? "accepted" : patch.error.issues[0]?.message)
+  const browse = browseQuerySchema.safeParse({ category: "BOOKS,SERVICES" })
+  check(!browse.success && browse.error.issues.some((i) => i.message === removedMsg), "browse ?category=…SERVICES -> 400 with the removal sentence", browse.success ? "accepted" : browse.error.issues[0]?.message)
+  check(createItemSchema.safeParse({ ...base, category: "OTHER" }).success, "category OTHER is still accepted")
+  const bogus = categorySchema.safeParse("BOOSK")
+  check(!bogus.success && bogus.error.issues[0]?.message !== removedMsg, "an unknown code keeps zod's own message", bogus.success ? "accepted" : bogus.error.issues[0]?.message)
 }
 
 async function dbChecks() {
