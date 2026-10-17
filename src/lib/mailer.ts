@@ -1,15 +1,6 @@
 import nodemailer from "nodemailer"
 import { VERIFY_CREDIT_LEAVES } from "@/lib/task-constants"
-import {
-  button,
-  codeCells,
-  escapeHtml,
-  paragraph,
-  renderEmailHtml,
-  renderEmailText,
-  strong,
-  type EmailContent,
-} from "@/lib/email-layout"
+import { escapeHtml, renderEmailHtml, renderEmailText, strong, type EmailContent } from "@/lib/email-layout"
 
 const transporter = nodemailer.createTransport({
   host: process.env.EMAIL_SMTP_HOST,
@@ -26,12 +17,14 @@ const transporter = nodemailer.createTransport({
 
 /*
  * Every message here is built from the one layout in lib/email-layout.ts —
- * see the note at the top of that file for why it is tables, inline styles,
- * a hosted logo beside a text wordmark, and never an inlined image.
+ * see the note at the top of that file for the design and its rules.
  *
  * The build* functions are pure and exported so a message can be rendered
  * without sending it (scripts/preview-emails.ts). The send* functions are the
- * only callers that touch SMTP.
+ * only callers that touch SMTP, and their signatures are unchanged.
+ *
+ * The recipient's name goes in the plain-text part's greeting only: the HTML
+ * is a heading and ONE line, and the line is about the action, not the person.
  */
 
 export type BuiltEmail = { subject: string; html: string; text: string }
@@ -41,7 +34,7 @@ const FROM = () => process.env.EMAIL_FROM ?? "Baylo <no-reply@baylo.ph>"
 const hi = (name?: string | null) => (name ? `Hi ${name},` : "Hi there,")
 
 function build(subject: string, content: EmailContent, textLines: string[]): BuiltEmail {
-  return { subject, html: renderEmailHtml(content), text: renderEmailText(textLines, content) }
+  return { subject, html: renderEmailHtml(content), text: renderEmailText(content, textLines) }
 }
 
 // ── Email verification ────────────────────────────────────────────────────────
@@ -55,22 +48,19 @@ function build(subject: string, content: EmailContent, textLines: string[]): Bui
  * the total that lands and does not explain how it is made up.
  */
 export function buildVerificationEmail(verifyUrl: string, name?: string | null): BuiltEmail {
-  const offer = `Confirm your email to get your ${VERIFY_CREDIT_LEAVES} welcome Leaves.`
-  const welcome = name ? `Hi ${name}, welcome to Baylo.` : "Welcome to Baylo."
+  const line = `Confirm your email to get your ${VERIFY_CREDIT_LEAVES} welcome Leaves.`
   return build(
     "Confirm your Baylo email",
     {
       title: "Confirm your Baylo email",
-      preheader: offer,
+      preheader: line,
       heading: "Confirm your email",
-      body: paragraph(escapeHtml(welcome), 16) +
-        paragraph(offer) +
-        button(verifyUrl, "Confirm my email"),
-      expiry: "This link expires in 24 hours and works once.",
-      reason: "You got this email because this address was used to create a Baylo account.",
-      ignore: "If you didn't sign up for Baylo, you can ignore this email.",
+      line: escapeHtml(line),
+      cta: { url: verifyUrl, label: "Confirm my email" },
+      small: "Expires in 24 hours.",
+      footer: "You got this because you signed up for Baylo. Didn't sign up? Ignore this email.",
     },
-    ["Confirm your Baylo email", "", welcome, "", `${offer} Open this link:`, verifyUrl],
+    [hi(name), "", line, verifyUrl],
   )
 }
 
@@ -81,29 +71,20 @@ export async function sendVerificationEmail(to: string, verifyUrl: string, name?
 
 // ── Password reset ────────────────────────────────────────────────────────────
 
-const RESET_EXPIRY = "30 minutes"
-
 export function buildPasswordResetEmail(resetUrl: string, name?: string | null): BuiltEmail {
-  const ask = "We got a request to reset the password for your Baylo account. Choose a new one with the button below."
+  const line = "Tap below to choose a new password for your Baylo account."
   return build(
     "Reset your Baylo password",
     {
       title: "Reset your Baylo password",
       preheader: "Choose a new password for your Baylo account.",
       heading: "Reset your password",
-      body: paragraph(escapeHtml(hi(name)), 16) + paragraph(ask) + button(resetUrl, "Choose a new password"),
-      expiry: `This link expires in ${RESET_EXPIRY} and works once.`,
-      reason: "You got this email because a password reset was requested for this address.",
-      ignore: "If you didn't ask for this, you can ignore this email. Your password won't change.",
+      line: escapeHtml(line),
+      cta: { url: resetUrl, label: "Choose a new password" },
+      small: "Expires in 30 minutes.",
+      footer: "You got this because a password reset was requested. Didn't ask? Ignore this email.",
     },
-    [
-      "Reset your Baylo password",
-      "",
-      hi(name),
-      "",
-      "We got a request to reset the password for your Baylo account. Choose a new one here:",
-      resetUrl,
-    ],
+    [hi(name), "", "Choose a new password for your Baylo account here:", resetUrl],
   )
 }
 
@@ -119,6 +100,11 @@ export async function sendPasswordResetEmail(to: string, resetUrl: string, name?
  * fresh pair is issued; the app shows the same code behind "Show my code"
  * when it can, and names this email as the backup when it cannot.
  *
+ * TEMPLATE ONLY. How codes are generated, checked, expired and issued lives in
+ * the confirm/start and confirm/submit routes and is not this file's business.
+ * `items` stays in the signature and in the plain-text part, so the caller is
+ * untouched.
+ *
  * No button: the code IS the content, and there is nowhere to go.
  */
 export function buildSwapCodeEmail(
@@ -133,31 +119,17 @@ export function buildSwapCodeEmail(
       title: "Your Baylo swap code",
       preheader: `Your swap code for meeting ${otherUserName}. Read it to them when you meet.`,
       heading: "Your swap code",
-      body:
-        paragraph(escapeHtml(hi(recipientName)), 16) +
-        paragraph(
-          `You&rsquo;re meeting ${strong(otherUserName)} to swap ${strong(items.yours)} for ${strong(items.theirs)}. ` +
-            `Read this code to ${escapeHtml(otherUserName)} when you meet. They type it into the app.`,
-        ) +
-        codeCells(code) +
-        paragraph(
-          `Then ${escapeHtml(otherUserName)} reads their code to you and you type it in. Both correct means the swap is confirmed.`,
-          16,
-        ),
-      expiry: "This code expires in 15 minutes and works once.",
-      reason: "You got this email because a swap you're part of reached its meetup step.",
-      ignore: "If you aren't meeting anyone, you can ignore this email. Nothing is confirmed without the code.",
+      line: `Read this code to ${strong(otherUserName)} when you meet. They type it into the app.`,
+      code,
+      small: "Expires in 15 minutes and works once.",
+      footer: "You got this because your swap reached its meetup step. Not meeting anyone? Ignore this email.",
     },
     [
-      `Your Baylo swap code: ${code}`,
-      "",
       hi(recipientName),
-      "",
-      `You're meeting ${otherUserName} to swap ${items.yours} for ${items.theirs}. Read this code to ${otherUserName} when you meet. They type it into the app.`,
       "",
       `Your code: ${code}`,
       "",
-      `Then ${otherUserName} reads their code to you and you type it in. Both correct means the swap is confirmed.`,
+      `Read it to ${otherUserName} when you meet to swap ${items.yours} for ${items.theirs}. They type it into the app.`,
     ],
   )
 }

@@ -108,6 +108,17 @@ function linkFor(to: string): string | null {
   return null
 }
 
+/** Pulls the password-reset link out of the most recent message to `to`. */
+function resetLinkFor(to: string): string | null {
+  for (let i = inbox.length - 1; i >= 0; i--) {
+    if (inbox[i].to !== to) continue
+    const decoded = inbox[i].body.replace(/=\r\n/g, "").replace(/=3D/g, "=")
+    const match = /https?:\/\/[^\s"'<>]*\/auth\/reset-password\?token=[A-Za-z0-9]+/.exec(decoded)
+    if (match) return match[0]
+  }
+  return null
+}
+
 // ── HTTP helpers ─────────────────────────────────────────────────────────────
 
 async function req(
@@ -121,6 +132,39 @@ async function req(
 }
 
 const jsonHeaders = { "content-type": "application/json", accept: "application/json" }
+
+/** The first <form> in served HTML: its method, action, and named input values. */
+function parseForm(html: string): { method: string; action: string; fields: Record<string, string> } | null {
+  const m = /<form\b([^>]*)>([\s\S]*?)<\/form>/i.exec(html)
+  if (!m) return null
+  const attr = (src: string, name: string) =>
+    new RegExp(`\\b${name}="([^"]*)"`, "i").exec(src)?.[1]?.replace(/&amp;/g, "&") ?? ""
+  const fields: Record<string, string> = {}
+  for (const input of m[2].matchAll(/<input\b([^>]*)>/gi)) {
+    const name = attr(input[1], "name")
+    if (name) fields[name] = attr(input[1], "value")
+  }
+  return { method: attr(m[1], "method").toLowerCase(), action: attr(m[1], "action"), fields }
+}
+
+/**
+ * Submits a form the way a browser with JavaScript OFF does: urlencoded body,
+ * the page's Origin, Accept: text/html, and no redirect-following, so the 303
+ * itself can be checked.
+ */
+async function submitForm(
+  action: string,
+  fields: Record<string, string>,
+  origin = new URL(BASE).origin,
+): Promise<{ status: number; location: string }> {
+  const res = await fetch(`${BASE}${action}`, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded", accept: "text/html", origin },
+    body: new URLSearchParams(fields).toString(),
+    redirect: "manual",
+  })
+  return { status: res.status, location: res.headers.get("location") ?? "" }
+}
 
 async function snapshot(userId: string) {
   const [u, txs, tokens] = await Promise.all([
@@ -277,15 +321,35 @@ async function main() {
     !snapOpened.isVerified && snapOpened.tokens === 1 && snapOpened.txs.length === 0,
     `isVerified=${snapOpened.isVerified} tokens=${snapOpened.tokens} rows=${snapOpened.txs.length}`)
 
-  const confirmA = () => req("/api/auth/verify-email", {
-    method: "POST", headers: jsonHeaders, body: JSON.stringify({ token: rawA }),
-  })
-  const verified = await confirmA()
+  // THE CONFIRM BUTTON, PRESSED THE WAY A BROWSER PRESSES IT (17 Oct 2026).
+  // This used to POST JSON straight at the API, which never touched the page —
+  // and so passed while the real button was dead on a phone whose browser
+  // could not load the page's scripts. Now: read the served page's HTML, find
+  // its <form> and hidden token, submit them as a browser submits a form with
+  // no JavaScript at all, and follow the 303 to the page that results.
+  const pageHtml = await opened.text()
+  const form = parseForm(pageHtml)
+  check("the confirm page carries a plain POST form (no JavaScript needed)",
+    form?.action === "/api/auth/verify-email" && form.method === "post", JSON.stringify(form))
+  check("the form's hidden token is the emailed one", form?.fields.token === rawA)
+  if (!form) throw new Error("no confirm form on the page — cannot continue")
+
+  // A form post from another site is refused before anything is spent.
+  const crossSite = await submitForm(form.action, form.fields, "http://evil.example")
+  check("a cross-site form post is refused (403)", crossSite.status === 403, `status=${crossSite.status}`)
+  const snapCross = await snapshot(userA.id)
+  check("…and spent nothing", !snapCross.isVerified && snapCross.tokens === 1, JSON.stringify(snapCross))
+
+  const verified = await submitForm(form.action, form.fields)
   const expected = SIGNUP_GRANT_LEAVES + TASK_REWARDS.VERIFY_ACCOUNT
-  check("POST (the Confirm button) returns 200", verified.status === 200, JSON.stringify(verified.json))
-  check("reported as a first-time verification", verified.json.alreadyVerified === false)
-  check(`reported ${expected} Leaves awarded`, verified.json.leavesAwarded === expected,
-    `got ${verified.json.leavesAwarded}`)
+  check("pressing Confirm answers 303 to the verified page",
+    verified.status === 303 && /\/auth\/verify-email\?status=verified&leaves=\d+$/.test(verified.location),
+    `status=${verified.status} location=${verified.location}`)
+  check(`the redirect reports ${expected} Leaves`, verified.location.endsWith(`leaves=${expected}`), verified.location)
+  const resultPage = await fetch(verified.location, { headers: { accept: "text/html" } })
+  const resultHtml = await resultPage.text()
+  check("the verified page says so", resultPage.status === 200 && resultHtml.includes("re verified") &&
+    resultHtml.includes(`${expected} welcome Leaves are in your balance`), `status=${resultPage.status}`)
 
   const snapA1 = await snapshot(userA.id)
   printLedger("ledger after verifying", snapA1.txs)
@@ -319,9 +383,19 @@ async function main() {
   // ── 4. Verifying twice credits nothing ─────────────────────────────────────
   console.log("\n[4] verifying twice credits nothing")
 
-  const replay = await confirmA()
-  check("the spent link is refused", replay.status === 400 && replay.json.code === "INVALID_TOKEN",
-    `status=${replay.status} body=${JSON.stringify(replay.json)}`)
+  // The same form, submitted again — a double tap, or Back and press again.
+  const replay = await submitForm(form.action, form.fields)
+  check("pressing Confirm again lands on 'didn't work'",
+    replay.status === 303 && replay.location.endsWith("/auth/verify-email?status=invalid"),
+    `status=${replay.status} location=${replay.location}`)
+  const replayJson = await req("/api/auth/verify-email", {
+    method: "POST", headers: jsonHeaders, body: JSON.stringify({ token: rawA }),
+  })
+  check("the spent token is refused over JSON too", replayJson.status === 400 && replayJson.json.code === "INVALID_TOKEN",
+    `status=${replayJson.status} body=${JSON.stringify(replayJson.json)}`)
+  const snapReplay = await snapshot(userA.id)
+  check("the second press credited nothing (still two ledger rows)", snapReplay.txs.length === 2 &&
+    snapReplay.leaves === expected, `rows=${snapReplay.txs.length} leaves=${snapReplay.leaves}`)
 
   // A spent link being rejected is the easy half. The half that matters is a
   // LIVE token against an account that is already verified — which is what a
@@ -419,6 +493,54 @@ async function main() {
     JSON.stringify({ v: snapB2.isVerified, n: snapB2.txs.length, l: snapB2.leaves }))
 
   // ── 8. The ledger invariant ────────────────────────────────────────────────
+  // ── 7b. Password reset, through the pages, with no JavaScript ─────────────
+  // The same rule as the Confirm button: every step is a plain form a browser
+  // submits on its own. Forgot page → email → reset page → new password works.
+  console.log("\n[7b] password reset through /auth/forgot and /auth/reset-password (forms only)")
+
+  const forgotPage = await fetch(`${BASE}/auth/forgot`, { headers: { accept: "text/html" } })
+  const forgotForm = parseForm(await forgotPage.text())
+  check("the forgot page carries a plain POST form",
+    forgotPage.status === 200 && forgotForm?.action === "/api/auth/forgot-password" && forgotForm.method === "post",
+    JSON.stringify(forgotForm))
+  const asked = await submitForm("/api/auth/forgot-password", { ...forgotForm?.fields, email: emailA })
+  check("submitting it answers 303 to 'check your email'",
+    asked.status === 303 && asked.location.includes("/auth/forgot?status=sent"), `status=${asked.status} location=${asked.location}`)
+
+  const resetLink = resetLinkFor(emailA)
+  check("a reset email arrived with a link to the reset page", resetLink !== null)
+  if (!resetLink) throw new Error("no reset link captured — cannot continue")
+  const resetPath = resetLink.slice(new URL(resetLink).origin.length)
+  const resetPage = await fetch(`${BASE}${resetPath}`, { headers: { accept: "text/html" } })
+  const resetForm = parseForm(await resetPage.text())
+  check("the reset page carries a plain POST form with the token",
+    resetPage.status === 200 && resetForm?.action === "/api/auth/reset-password" &&
+    resetForm.fields.token === new URL(resetLink).searchParams.get("token"), JSON.stringify(resetForm))
+  if (!resetForm) throw new Error("no reset form on the page — cannot continue")
+
+  const NEW_PASSWORD = "a-new-horse-battery"
+  const mismatch = await submitForm(resetForm.action, { ...resetForm.fields, password: NEW_PASSWORD, confirm: "something-else" })
+  check("mismatched passwords go back to the form, token kept, password not in the URL",
+    mismatch.status === 303 && mismatch.location.includes("error=mismatch") &&
+    mismatch.location.includes(`token=${resetForm.fields.token}`) && !mismatch.location.includes(NEW_PASSWORD),
+    mismatch.location)
+
+  const saved = await submitForm(resetForm.action, { ...resetForm.fields, password: NEW_PASSWORD, confirm: NEW_PASSWORD })
+  check("a matching pair answers 303 to 'password updated'",
+    saved.status === 303 && saved.location.endsWith("/auth/reset-password?status=saved"), saved.location)
+  const newLogin = await req("/api/auth/token", {
+    method: "POST", headers: jsonHeaders, body: JSON.stringify({ email: emailA, password: NEW_PASSWORD }),
+  })
+  check("the new password signs in", newLogin.status === 200 && typeof newLogin.json.accessToken === "string",
+    `status=${newLogin.status}`)
+  const oldLogin = await req("/api/auth/token", {
+    method: "POST", headers: jsonHeaders, body: JSON.stringify({ email: emailA, password: PASSWORD }),
+  })
+  check("the old password no longer does", oldLogin.status === 401, `status=${oldLogin.status}`)
+  const resetAgain = await submitForm(resetForm.action, { ...resetForm.fields, password: NEW_PASSWORD, confirm: NEW_PASSWORD })
+  check("the spent reset link lands on 'didn't work'",
+    resetAgain.status === 303 && resetAgain.location.endsWith("/auth/reset-password?status=invalid"), resetAgain.location)
+
   console.log("\n[8] ledger invariant")
 
   const after = await ledgerTotals()

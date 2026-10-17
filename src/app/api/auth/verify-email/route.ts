@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server"
 import { consumeVerificationToken, type ConsumeResult } from "@/lib/email-verification"
+import { crossSiteRefusal, formField, isFormPost, seeOther } from "@/lib/form-post"
 import { publicBaseUrl } from "@/lib/public-url"
 import { parseBody, verifyEmailSchema } from "@/lib/validation"
 
@@ -16,10 +17,13 @@ import { parseBody, verifyEmailSchema } from "@/lib/validation"
  * The GET/POST exports below are what prove it: the catch-all's handlers are
  * never invoked for this path.
  *
- * One transport spends a token, and it is POST { token }: the confirm page's
- * button (app/auth/verify-email) and the native client both send it. GET only
- * forwards to the page — see GET below for why. consumeVerificationToken() is
- * the one place a token is validated and spent.
+ * Only POST spends a token, in two encodings:
+ *   form  token=…    the confirm page's button (app/auth/verify-email), a plain
+ *                    HTML form that works without JavaScript; answered 303 to
+ *                    the page's ?status= result.
+ *   JSON  { token }  the native client; answered JSON, unchanged.
+ * GET only forwards to the page — see GET below for why.
+ * consumeVerificationToken() is the one place a token is validated and spent.
  */
 
 const REASON_STATUS: Record<"invalid" | "expired", number> = {
@@ -86,6 +90,8 @@ export async function GET(req: NextRequest) {
  * error page, so the confirm page can say "try again" instead of guessing.
  */
 export async function POST(req: NextRequest) {
+  if (isFormPost(req)) return formPost(req)
+
   const parsed = await parseBody(req, verifyEmailSchema)
   if (!parsed.ok) return parsed.response
 
@@ -97,5 +103,36 @@ export async function POST(req: NextRequest) {
       { error: "Could not check that link just now", code: "SERVER_ERROR" },
       { status: 500 },
     )
+  }
+}
+
+/**
+ * The confirm page's button. Same redemption as the JSON path; the answer is a
+ * 303 to the page state instead of JSON. A server failure keeps the token in
+ * the redirect so the page can offer the same button again.
+ */
+async function formPost(req: NextRequest): Promise<NextResponse> {
+  const refused = crossSiteRefusal(req)
+  if (refused) return refused
+
+  const page = "/auth/verify-email"
+  let token = ""
+  try {
+    token = formField(await req.formData(), "token").trim()
+  } catch {
+    return seeOther(req, page, { status: "invalid" })
+  }
+  if (!verifyEmailSchema.safeParse({ token }).success) return seeOther(req, page, { status: "invalid" })
+
+  try {
+    const result = await consumeVerificationToken(token)
+    if (!result.ok) return seeOther(req, page, { status: result.reason })
+    const { flipped, grantAwarded, taskAwarded } = result.verification
+    return flipped
+      ? seeOther(req, page, { status: "verified", leaves: String(grantAwarded + taskAwarded) })
+      : seeOther(req, page, { status: "already" })
+  } catch (err) {
+    console.error("[verify-email form]", err instanceof Error ? err.message : "unknown error")
+    return seeOther(req, page, { status: "server", token })
   }
 }

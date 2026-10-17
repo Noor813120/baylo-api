@@ -1,20 +1,30 @@
 import localFont from "next/font/local"
-import type { CSSProperties, ReactNode } from "react"
+import type { ReactNode } from "react"
+import { PAGE_PHOTO_URL } from "@/lib/brand-media"
 
 /**
- * The shell the emailed links land in: /auth/verify-email and
- * /auth/reset-password.
+ * The shell the emailed links land in: /auth/verify-email,
+ * /auth/reset-password and /auth/forgot.
  *
- * These are the only web pages most people ever see — the app is Android, and
- * the web is retired for users — so they are drawn in the APP's language, not
- * the old web direction: baylo-mobile's tokens (`src/theme/tokens.js`), its two
- * faces (Bricolage Grotesque for headings, Public Sans for everything else,
- * bundled here from the app's own OFL files so nothing is fetched at runtime),
- * the 52 px / 10 px-radius button, and the same forest green the emails use for
- * their one action. No gradients, no shadows.
+ * ── THE APP'S WELCOME SCREEN, ON THE WEB ─────────────────────────────────────
  *
- * Mobile-first: one 440 px column, 16 px side gutter, nothing wider than the
- * viewport. One heading, one short message, one action per state.
+ * baylo-mobile's sign-in screen is a photo band (the Welcome video) with the
+ * white wordmark over a flat tint, and an off-white sheet with 28 px rounded
+ * top corners overlapping it by 28 px. This is that layout: a still of the same
+ * footage (lib/brand-media.ts), the same tokens (`tokens.js`), the same faces
+ * (Bricolage Grotesque, Public Sans — bundled from the app's own OFL files, so
+ * nothing is fetched at runtime) and the forest-green 52 px / 10 px button.
+ * The photo grows to fill whatever height the sheet leaves, so no screen has an
+ * empty area.
+ *
+ * ── NO JAVASCRIPT REQUIRED ───────────────────────────────────────────────────
+ *
+ * Every page built on this is a SERVER component and every action is a plain
+ * <form method="post"> to a route that answers 303 to the result state. Nothing
+ * here depends on the page hydrating. That is not a nicety: from a phone, the
+ * dev server's /_next scripts can be refused (allowedDevOrigins, 17 Oct 2026),
+ * an in-app browser can block them, a slow connection can drop them — and a
+ * Confirm button wired to onClick was simply dead when that happened.
  */
 
 const display = localFont({
@@ -43,9 +53,9 @@ export const landing = {
   line: "#E2E0D6",
   forest: "#1B4D2B",
   onForest: "#FAFAF7",
-  wash: "#EAF6EC",
   urgent: "#B0553A",
   urgentWash: "#FBEEE9",
+  urgentLine: "#F0D8CE",
 } as const
 
 /** The app's home. `baylo` is in baylo-mobile's app.json `scheme`. */
@@ -53,75 +63,97 @@ export const APP_DEEP_LINK = "baylo://"
 
 export function LandingShell({ children }: { children: ReactNode }) {
   return (
-    <div
-      className={sans.className}
-      style={{
-        minHeight: "100svh",
-        background: landing.surface,
-        color: landing.ink,
-        padding: "0 16px",
-        boxSizing: "border-box",
-        overflowX: "hidden",
-      }}
-    >
-      <div style={{ maxWidth: 440, margin: "0 auto", padding: "24px 0 48px" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 40 }}>
-          {/* eslint-disable-next-line @next/next/no-img-element -- a 2.6 KB static mark; next/image buys nothing here */}
-          <img src="/email/baylo-leaf-96.png" width={32} height={32} alt="" style={{ borderRadius: 8, display: "block" }} />
-          <span className={display.className} style={{ fontSize: 22, letterSpacing: "-0.4px", lineHeight: "26px" }}>
+    <div className={sans.className} style={{ background: landing.ink, minHeight: "100svh", color: landing.ink }}>
+      <div
+        style={{
+          maxWidth: 480,
+          margin: "0 auto",
+          minHeight: "100svh",
+          display: "flex",
+          flexDirection: "column",
+          background: landing.surface,
+          overflowX: "hidden",
+        }}
+      >
+        <div
+          style={{
+            position: "relative",
+            flex: "1 0 281px",
+            backgroundColor: "#3E3A33",
+            backgroundImage: `url("${PAGE_PHOTO_URL}")`,
+            backgroundSize: "cover",
+            backgroundPosition: "center 30%",
+          }}
+        >
+          {/* The flat tint the app lays over its band, so the wordmark reads on any frame. */}
+          <div aria-hidden style={{ position: "absolute", inset: 0, background: "rgba(20,20,15,0.40)" }} />
+          <span
+            className={display.className}
+            style={{ position: "absolute", top: 44, left: 16, fontSize: 24, letterSpacing: "-0.48px", color: "#FAFAF7" }}
+          >
             Baylo
           </span>
         </div>
-        <main>{children}</main>
+        <main
+          style={{
+            position: "relative",
+            marginTop: -28,
+            background: landing.surface,
+            borderRadius: "28px 28px 0 0",
+            padding: "26px 24px 32px",
+          }}
+        >
+          {children}
+        </main>
       </div>
-    </div>
-  )
-}
-
-type Tone = "ok" | "bad" | "neutral"
-type Glyph = "check" | "alert" | "clock" | "mail" | "key"
-
-const GLYPH: Record<Glyph, ReactNode> = {
-  check: <path d="m5 12.5 4.5 4.5L19 7.5" />,
-  alert: <><circle cx="12" cy="12" r="9" /><path d="M12 7.5v5.5M12 16.5h.01" /></>,
-  clock: <><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></>,
-  mail: <><rect x="3" y="5" width="18" height="14" rx="2.5" /><path d="m4 7 8 6 8-6" /></>,
-  key: <><circle cx="8" cy="15" r="4" /><path d="m11 12 8-8M16 7l2 2" /></>,
-}
-
-export function StatusMark({ tone, glyph }: { tone: Tone; glyph: Glyph }) {
-  const bg = tone === "ok" ? landing.wash : tone === "bad" ? landing.urgentWash : landing.control
-  const fg = tone === "ok" ? landing.forest : tone === "bad" ? landing.urgent : landing.body
-  return (
-    <div
-      aria-hidden
-      style={{ width: 56, height: 56, borderRadius: 16, display: "grid", placeItems: "center", marginBottom: 20, background: bg, color: fg }}
-    >
-      <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-        {GLYPH[glyph]}
-      </svg>
     </div>
   )
 }
 
 export function LandingHeading({ children }: { children: ReactNode }) {
   return (
-    <h1 className={display.className} style={{ fontSize: 27, lineHeight: "32px", letterSpacing: "-0.3px", margin: "0 0 10px", color: landing.ink }}>
+    <h1 className={display.className} style={{ fontSize: 27, lineHeight: "32.4px", margin: "0 0 10px", color: landing.ink }}>
       {children}
     </h1>
   )
 }
 
 export function LandingBody({ children }: { children: ReactNode }) {
-  return <p style={{ fontSize: 15, lineHeight: "23px", color: landing.body, margin: "0 0 28px" }}>{children}</p>
+  return <p style={{ fontSize: 15, lineHeight: "23.25px", color: landing.body, margin: "0 0 28px" }}>{children}</p>
+}
+
+/** Bold ink inside a LandingBody. */
+export function Em({ children }: { children: ReactNode }) {
+  return <strong style={{ color: landing.ink }}>{children}</strong>
 }
 
 /** The muted line under the action. */
 export function LandingHelp({ children }: { children: ReactNode }) {
-  return <p style={{ fontSize: 13, lineHeight: "19px", color: landing.muted, margin: "14px 0 0", textAlign: "center" }}>{children}</p>
+  return <p style={{ fontSize: 13, lineHeight: "19.5px", color: landing.muted, margin: "14px 0 0", textAlign: "center" }}>{children}</p>
 }
 
-const actionStyle = (busy: boolean): CSSProperties => ({
+/** The app's terracotta panel, for a form error. */
+export function LandingAlert({ children }: { children: ReactNode }) {
+  return (
+    <p
+      role="alert"
+      style={{
+        fontSize: 13,
+        lineHeight: "19.5px",
+        color: landing.urgent,
+        background: landing.urgentWash,
+        border: `1px solid ${landing.urgentLine}`,
+        borderRadius: 12,
+        padding: "12px 14px",
+        margin: "0 0 20px",
+      }}
+    >
+      {children}
+    </p>
+  )
+}
+
+const action = {
   display: "flex",
   alignItems: "center",
   justifyContent: "center",
@@ -129,41 +161,77 @@ const actionStyle = (busy: boolean): CSSProperties => ({
   height: 52,
   borderRadius: 10,
   border: "none",
-  background: busy ? landing.control : landing.forest,
-  color: busy ? landing.muted : landing.onForest,
+  background: landing.forest,
+  color: landing.onForest,
   fontFamily: "inherit",
   fontSize: 16,
   fontWeight: 700,
   textDecoration: "none",
-  cursor: busy ? "default" : "pointer",
+  cursor: "pointer",
   boxSizing: "border-box",
-})
+} as const
 
-/** The one action: a link (`href`) or a button (`onClick` / `type="submit"`). */
-export function PrimaryAction({
-  children,
-  href,
-  onClick,
-  type = "button",
-  busy = false,
-}: {
-  children: ReactNode
-  href?: string
-  onClick?: () => void
-  type?: "button" | "submit"
-  busy?: boolean
-}) {
-  if (href) {
-    return (
-      <a href={href} style={actionStyle(false)}>
-        {children}
-      </a>
-    )
-  }
+/** The one action, as a link. */
+export function ActionLink({ href, children }: { href: string; children: ReactNode }) {
   return (
-    <button type={type} onClick={onClick} disabled={busy} aria-busy={busy} style={actionStyle(busy)}>
+    <a href={href} style={action}>
+      {children}
+    </a>
+  )
+}
+
+/** The one action, as the submit button of the surrounding <form>. */
+export function SubmitButton({ children }: { children: ReactNode }) {
+  return (
+    <button type="submit" style={action}>
       {children}
     </button>
+  )
+}
+
+export function TextField({
+  id,
+  name,
+  label,
+  type = "text",
+  defaultValue,
+  autoComplete,
+}: {
+  id: string
+  name: string
+  label: string
+  type?: "text" | "email" | "password"
+  defaultValue?: string
+  autoComplete?: string
+}) {
+  return (
+    <>
+      <label htmlFor={id} style={{ display: "block", fontSize: 12, fontWeight: 600, color: landing.muted, margin: "0 0 6px" }}>
+        {label}
+      </label>
+      <input
+        id={id}
+        name={name}
+        type={type}
+        defaultValue={defaultValue}
+        autoComplete={autoComplete}
+        autoCapitalize={type === "email" ? "none" : undefined}
+        required
+        style={{
+          width: "100%",
+          height: 52,
+          boxSizing: "border-box",
+          borderRadius: 10,
+          border: `1px solid ${landing.line}`,
+          background: landing.control,
+          padding: "0 14px",
+          fontFamily: "inherit",
+          fontSize: 16,
+          color: landing.ink,
+          margin: "0 0 16px",
+        }}
+      />
+    </>
   )
 }
 
@@ -171,8 +239,14 @@ export function PrimaryAction({
 export function BackToApp({ label = "Go back to the Baylo app" }: { label?: string }) {
   return (
     <>
-      <PrimaryAction href={APP_DEEP_LINK}>{label}</PrimaryAction>
+      <ActionLink href={APP_DEEP_LINK}>{label}</ActionLink>
       <LandingHelp>If the app doesn&rsquo;t open, open Baylo from your home screen.</LandingHelp>
     </>
   )
+}
+
+/** One query parameter, as a string. */
+export function param(sp: Record<string, string | string[] | undefined>, key: string): string {
+  const v = sp[key]
+  return (Array.isArray(v) ? v[0] : v ?? "").trim()
 }

@@ -1,38 +1,41 @@
+import { EMAIL_BANNER_URL } from "@/lib/brand-media"
+
 /**
- * The one layout every Baylo email is poured into.
+ * The one layout every Baylo email is poured into: a small version of the
+ * emailed-link landing pages (app/auth/_components/EmailLanding.tsx).
  *
- * ── WHY IT LOOKS LIKE THIS ───────────────────────────────────────────────────
+ *   ┌──────────────────────────────┐
+ *   │ Baylo        (photo banner)  │  forest-green cell behind the photo, so
+ *   │╭────────────────────────────╮│  with images blocked it is a green band
+ *   ││ Heading                    ││  with the white wordmark, never a hole
+ *   ││ One line.                  ││
+ *   ││ [ the one button ]         ││  off-white sheet, rounded top corners
+ *   ││ Expires… Button not working? <short link>
+ *   ││                            ││
+ *   ││ why you got this · ignore  ││  footer: two lines
+ *   ││ Baylo · Cebu City · contact││
  *
- * The colours, the 10 px button radius and the type pairing are the mobile
- * app's (baylo-mobile `src/theme/tokens.js`): the off-white `surface` card on
- * the warmer `control` ground, `ink` headings, `inkSecondary` body, and the
- * deep `forest` green for the one action. Not the bright `green` the app uses
- * for its primary button: forest under off-white type is legible at email
- * sizes and survives Gmail's dark-mode recolouring; the bright green with dark
- * type does not.
+ * ── LIGHT ONLY, ON PURPOSE ───────────────────────────────────────────────────
  *
- * Bricolage Grotesque and Public Sans are NAMED first in each stack and are
- * not loaded: Gmail ignores web fonts, so in Gmail this renders in Segoe UI,
- * Roboto or Arial. That is the stack doing its job, not a bug.
+ * There is no hand-built dark version. Gmail's apps recolour an email that
+ * ships no dark styles by inverting its light fills and lightening dark text,
+ * and leave dark fills and images alone. So the design keeps to colours that
+ * survive that: the one background is the light sheet (it inverts cleanly),
+ * every piece of white text sits on a DARK fill (the banner, the button) that
+ * Gmail does not touch, and the code digits are on a solid light-green fill
+ * with no thin border to lose.
  *
  * ── THE RULES THESE TEMPLATES KEEP ───────────────────────────────────────────
  *
  * Until 11 Sep 2026 every template inlined public/logo.png as a base64 data
- * URI, twice. Each email carried ~800 KB of HTML, Gmail clipped it at ~102 KB
- * inside the first <img>, and refuses `data:` images anyway — a Gmail user saw
- * a broken header, no button and a bare URL. So:
+ * URI. Each email carried ~800 KB of HTML, Gmail clipped it at ~102 KB and
+ * refuses `data:` images anyway. So: NO inlined images, ever. The one image is
+ * the hosted banner (a public URL — Gmail fetches images through its own proxy,
+ * which cannot reach a LAN address). Tables and inline styles only, one column,
+ * max 480 px. Every piece of text that reaches HTML goes through escapeHtml().
  *
- *   - NO inlined images, ever. The logo is a hosted image (Cloudinary by
- *     default, EMAIL_LOGO_URL to override, http(s) only) and the wordmark beside it is TEXT, so the header still
- *     reads "Baylo" with images blocked. The logo must be on a PUBLIC host:
- *     Gmail fetches images through its own proxy, which cannot reach a LAN
- *     address, so a logo served from the dev laptop never loads in Gmail.
- *   - Tables and inline styles only. The <style> block carries nothing but
- *     the dark-mode overrides, for the clients that honour them; everything
- *     still reads correctly where it is stripped.
- *   - One column, max 480 px, fluid below it, 16 px side gutter on a phone.
- *   - Every piece of text that reaches HTML goes through escapeHtml(), the
- *     URLs included — a `&` in a query string still has to be `&amp;`.
+ * Bricolage Grotesque and Public Sans are named first and not loaded: Gmail
+ * ignores web fonts, so in Gmail this renders in Segoe UI / Roboto / Arial.
  */
 
 export function escapeHtml(s: string): string {
@@ -43,55 +46,27 @@ export function escapeHtml(s: string): string {
     .replace(/"/g, "&quot;")
 }
 
-/** baylo-mobile tokens.js, light set. */
-export const EMAIL_COLOR = {
-  ground: "#F1EFE8", // color.control
-  card: "#FAFAF7", // color.surface
+/** baylo-mobile tokens.js. */
+const C = {
+  sheet: "#FAFAF7", // color.surface — the one background
   ink: "#14140F", // color.ink
   body: "#5C5B52", // color.inkSecondary
   muted: "#8C8A7E", // color.inkMuted
-  line: "#E2E0D6", // color.controlLine
-  divider: "#EDEBE3", // color.divider
-  forest: "#1B4D2B", // color.forest
-  onForest: "#FAFAF7",
-  wash: "#EAF6EC", // color.greenWash
+  forest: "#1B4D2B", // color.forest — banner fallback and the button
+  codeFill: "#DCEFE0", // a solid light green for the code digits
 } as const
 
-/** baylo-mobile tokens.js, dark set — only where a client asks for dark. */
-const DARK = {
-  ground: "#111311",
-  card: "#171A17",
-  ink: "#F4F5F0",
-  body: "#B6BDB3",
-  muted: "#929B91",
-  line: "#343A34",
-  link: "#72D681",
-} as const
-
-export const DISPLAY_FONT = "font-family:'Bricolage Grotesque','Segoe UI',Roboto,Helvetica,Arial,sans-serif;"
-export const SANS_FONT = "font-family:'Public Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;"
-
-const C = EMAIL_COLOR
+const DISPLAY = "font-family:'Bricolage Grotesque','Segoe UI',Roboto,Helvetica,Arial,sans-serif;"
+const SANS = "font-family:'Public Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;"
 
 export function contactAddress(): string {
   return (process.env.EMAIL_CONTACT ?? "").trim() || "bayloplatform@gmail.com"
 }
 
-/**
- * The project logo, uploaded once to Baylo's Cloudinary (a public delivery URL,
- * not a credential). public/email/baylo-leaf-96.png is the source file.
- */
-export const DEFAULT_EMAIL_LOGO_URL =
-  "https://res.cloudinary.com/dm7ctbxq7/image/upload/v1792168950/baylo/email/baylo-leaf-96.png"
-
-/**
- * The logo to show: EMAIL_LOGO_URL when it is an http(s) URL, else the default.
- * Anything else in the variable (a data URI, a file path) is ignored — see the
- * note at the top. The wordmark beside it is text either way.
- */
-function hostedLogo(): string {
-  const configured = (process.env.EMAIL_LOGO_URL ?? "").trim()
-  return /^https?:\/\//i.test(configured) ? configured : DEFAULT_EMAIL_LOGO_URL
+/** EMAIL_BANNER_URL overrides the banner when it is an http(s) URL. */
+function bannerUrl(): string {
+  const configured = (process.env.EMAIL_BANNER_URL ?? "").trim()
+  return /^https?:\/\//i.test(configured) ? configured : EMAIL_BANNER_URL
 }
 
 /**
@@ -108,65 +83,53 @@ export function shortLink(url: string): string {
   }
 }
 
-/** A body paragraph. `html` must already be safe. */
-export function paragraph(html: string, marginTop = 12): string {
-  return `<p class="b-body" style="margin:${marginTop}px 0 0 0;${SANS_FONT}font-size:16px;line-height:24px;color:${C.body};">${html}</p>`
-}
-
-/** Bold ink inside a paragraph, for names and item titles. Escapes `text`. */
+/** Bold ink inside the line, for names. Escapes `text`. */
 export function strong(text: string): string {
-  return `<strong class="b-ink" style="color:${C.ink};font-weight:700;">${escapeHtml(text)}</strong>`
-}
-
-/**
- * The one call-to-action: a bulletproof full-width button (a table cell with
- * a background, which every client paints) and the same URL beneath it,
- * shortened for reading, still the full link underneath.
- */
-export function button(url: string, label: string): string {
-  const href = escapeHtml(url)
-  return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:24px 0 0 0;">
-  <tr><td align="center" bgcolor="${C.forest}" style="border-radius:10px;background-color:${C.forest};">
-    <a href="${href}" target="_blank" style="display:block;padding:16px 24px;${SANS_FONT}font-size:16px;line-height:20px;font-weight:700;color:${C.onForest};text-decoration:none;border-radius:10px;">${escapeHtml(label)}</a>
-  </td></tr>
-</table>
-<p class="b-muted" style="margin:16px 0 0 0;${SANS_FONT}font-size:13px;line-height:19px;color:${C.muted};">Button not working? Use this link:<br>
-<a href="${href}" target="_blank" class="b-link" style="color:${C.forest};text-decoration:underline;word-break:break-all;">${escapeHtml(shortLink(url))}</a></p>`
-}
-
-/** Six (or however many) digit cells, for a code the reader reads aloud. */
-export function codeCells(code: string): string {
-  const cells = code
-    .split("")
-    .map(
-      (d) =>
-        `<td style="padding:0 6px 0 0;"><div class="b-code" style="width:40px;height:52px;line-height:52px;border:1.5px solid ${C.forest};border-radius:10px;background-color:${C.wash};${SANS_FONT}font-size:24px;font-weight:700;color:${C.ink};text-align:center;">${escapeHtml(d)}</div></td>`,
-    )
-    .join("")
-  return `<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:20px 0 0 0;"><tr>${cells}</tr></table>`
+  return `<strong style="color:${C.ink};font-weight:700;">${escapeHtml(text)}</strong>`
 }
 
 export type EmailContent = {
-  /** <title>, and what a client shows when it has nothing better. */
+  /** <title>. Plain text. */
   title: string
   /** The inbox preview line. Plain text. */
   preheader: string
   /** Plain text. */
   heading: string
-  /** Already-safe HTML: paragraph(), button(), codeCells(). */
-  body: string
-  /** Plain text, e.g. "This link expires in 24 hours and works once." */
-  expiry: string
-  /** Plain text: why this address got this email. */
-  reason: string
-  /** Plain text: the "you can ignore this" line. */
-  ignore: string
+  /** The ONE line under the heading. Already-safe HTML (see strong()). */
+  line: string
+  /** The one button, or none (the swap code has nothing to open). */
+  cta?: { url: string; label: string }
+  /** Digits to show in cells under the line. */
+  code?: string
+  /** Plain text before "Button not working?", e.g. "Expires in 24 hours." */
+  small: string
+  /** Plain text: why you got this, and the ignore line, in one sentence pair. */
+  footer: string
+}
+
+function codeCells(code: string): string {
+  const cells = code
+    .split("")
+    .map(
+      (d) =>
+        `<td style="padding:0 6px 0 0;"><div style="width:40px;height:52px;line-height:52px;border-radius:10px;background-color:${C.codeFill};${SANS}font-size:24px;font-weight:700;color:${C.ink};text-align:center;">${escapeHtml(d)}</div></td>`,
+    )
+    .join("")
+  return `<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:20px 0 0 0;"><tr>${cells}</tr></table>`
 }
 
 export function renderEmailHtml(m: EmailContent): string {
-  const logo = hostedLogo()
+  const banner = escapeHtml(bannerUrl())
   const contact = escapeHtml(contactAddress())
-  const logoCell = `<td style="padding-right:10px;vertical-align:middle;"><img src="${escapeHtml(logo)}" width="36" height="36" alt="Baylo" style="display:block;width:36px;height:36px;border:0;border-radius:9px;${SANS_FONT}font-size:12px;font-weight:700;color:${C.forest};"></td>`
+  const href = m.cta ? escapeHtml(m.cta.url) : ""
+
+  const button = m.cta
+    ? `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:22px 0 0 0;"><tr>
+<td align="center" bgcolor="${C.forest}" style="border-radius:10px;background-color:${C.forest};"><a href="${href}" target="_blank" style="display:block;padding:16px 24px;${SANS}font-size:16px;line-height:20px;font-weight:700;color:#FFFFFF;text-decoration:none;border-radius:10px;">${escapeHtml(m.cta.label)}</a></td></tr></table>`
+    : ""
+  const small = m.cta
+    ? `${escapeHtml(m.small)} Button not working? <a href="${href}" target="_blank" style="color:${C.forest};text-decoration:underline;word-break:break-all;">${escapeHtml(shortLink(m.cta.url))}</a>`
+    : escapeHtml(m.small)
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -174,65 +137,46 @@ export function renderEmailHtml(m: EmailContent): string {
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="x-apple-disable-message-reformatting">
-<meta name="color-scheme" content="light dark">
-<meta name="supported-color-schemes" content="light dark">
 <title>${escapeHtml(m.title)}</title>
-<style>
-  :root { color-scheme: light dark; supported-color-schemes: light dark; }
-  @media (prefers-color-scheme: dark) {
-    .b-ground { background-color:${DARK.ground} !important; }
-    .b-card { background-color:${DARK.card} !important; border-color:${DARK.line} !important; }
-    .b-ink { color:${DARK.ink} !important; }
-    .b-body { color:${DARK.body} !important; }
-    .b-muted { color:${DARK.muted} !important; }
-    .b-link { color:${DARK.link} !important; }
-    .b-rule { border-color:${DARK.line} !important; }
-    .b-code { background-color:${DARK.ground} !important; border-color:${DARK.link} !important; color:${DARK.ink} !important; }
-  }
-  [data-ogsc] .b-card { background-color:${DARK.card} !important; }
-  [data-ogsc] .b-ink { color:${DARK.ink} !important; }
-  [data-ogsc] .b-body { color:${DARK.body} !important; }
-  [data-ogsc] .b-link { color:${DARK.link} !important; }
-</style>
 </head>
-<body class="b-ground" style="margin:0;padding:0;background-color:${C.ground};-webkit-text-size-adjust:100%;">
+<body style="margin:0;padding:0;background-color:${C.sheet};-webkit-text-size-adjust:100%;">
 <div style="display:none;max-height:0;overflow:hidden;opacity:0;mso-hide:all;">${escapeHtml(m.preheader)}${"&#847;&zwnj;&nbsp;".repeat(30)}</div>
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" class="b-ground" bgcolor="${C.ground}" style="background-color:${C.ground};">
-<tr><td align="center" style="padding:24px 16px 32px 16px;">
-  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width:480px;">
-    <tr><td style="padding:0 4px 16px 4px;">
-      <table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>
-        ${logoCell}
-        <td class="b-ink" style="vertical-align:middle;${DISPLAY_FONT}font-size:22px;line-height:26px;font-weight:700;letter-spacing:-0.4px;color:${C.ink};">Baylo</td>
-      </tr></table>
-    </td></tr>
-    <tr><td class="b-card" bgcolor="${C.card}" style="background-color:${C.card};border:1px solid ${C.line};border-radius:16px;padding:28px 24px;">
-      <h1 class="b-ink" style="margin:0;${DISPLAY_FONT}font-size:26px;line-height:31px;font-weight:700;letter-spacing:-0.3px;color:${C.ink};">${escapeHtml(m.heading)}</h1>
-      ${m.body}
-      <p class="b-body b-rule" style="margin:24px 0 0 0;padding-top:16px;border-top:1px solid ${C.divider};${SANS_FONT}font-size:14px;line-height:20px;color:${C.body};">${escapeHtml(m.expiry)}</p>
-    </td></tr>
-    <tr><td class="b-muted" style="padding:20px 4px 0 4px;${SANS_FONT}font-size:12px;line-height:18px;color:${C.muted};">
-      <p style="margin:0 0 8px 0;">${escapeHtml(m.reason)} ${escapeHtml(m.ignore)}</p>
-      <p style="margin:0 0 8px 0;"><strong class="b-body" style="color:${C.body};">Baylo</strong> &middot; Cebu City, Philippines &middot; Questions? <a href="mailto:${contact}" class="b-link" style="color:${C.forest};">${contact}</a></p>
-      <p style="margin:0;">This email was sent from a no-reply address. Replies aren&rsquo;t read.</p>
-    </td></tr>
-  </table>
-</td></tr>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="${C.sheet}" style="background-color:${C.sheet};"><tr><td align="center" style="padding:16px 12px 28px 12px;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width:480px;">
+  <tr><td bgcolor="${C.forest}" background="${banner}" style="background-color:${C.forest};background-image:url('${banner}');background-size:cover;background-position:center;border-radius:16px 16px 0 0;padding:0;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+      <tr><td height="96" valign="top" style="height:96px;padding:20px 24px 0 24px;">
+        <span style="${DISPLAY}font-size:26px;line-height:30px;font-weight:700;letter-spacing:-0.5px;color:#FFFFFF;">Baylo</span>
+      </td></tr>
+      <tr><td height="24" bgcolor="${C.sheet}" style="height:24px;line-height:24px;font-size:0;background-color:${C.sheet};border-radius:24px 24px 0 0;">&nbsp;</td></tr>
+    </table>
+  </td></tr>
+  <tr><td bgcolor="${C.sheet}" style="background-color:${C.sheet};padding:6px 24px 0 24px;">
+    <h1 style="margin:0;${DISPLAY}font-size:26px;line-height:31px;font-weight:700;letter-spacing:-0.3px;color:${C.ink};">${escapeHtml(m.heading)}</h1>
+    <p style="margin:10px 0 0 0;${SANS}font-size:16px;line-height:24px;color:${C.body};">${m.line}</p>
+    ${m.code ? codeCells(m.code) : ""}${button}
+    <p style="margin:14px 0 0 0;${SANS}font-size:13px;line-height:19px;color:${C.muted};">${small}</p>
+  </td></tr>
+  <tr><td style="padding:32px 24px 0 24px;${SANS}font-size:12px;line-height:18px;color:${C.muted};">
+    <p style="margin:0 0 4px 0;">${escapeHtml(m.footer)}</p>
+    <p style="margin:0;">Baylo &middot; Cebu City &middot; <a href="mailto:${contact}" style="color:${C.muted};text-decoration:underline;">${contact}</a></p>
+  </td></tr>
 </table>
+</td></tr></table>
 </body>
 </html>`
 }
 
 /** The plain-text part: the same words, the full URL, the same footer. */
-export function renderEmailText(lines: string[], m: Pick<EmailContent, "expiry" | "reason" | "ignore">): string {
+export function renderEmailText(m: EmailContent, lines: string[]): string {
   return [
+    m.heading,
+    "",
     ...lines,
     "",
-    m.expiry,
+    m.small,
     "",
-    `${m.reason} ${m.ignore}`,
-    "",
-    `Baylo · Cebu City, Philippines · Questions? ${contactAddress()}`,
-    "This email was sent from a no-reply address. Replies aren't read.",
+    m.footer,
+    `Baylo · Cebu City · ${contactAddress()}`,
   ].join("\n")
 }

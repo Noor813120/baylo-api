@@ -4,7 +4,7 @@
  *   npx tsx scripts/preview-emails.ts [outDir]
  *
  * Writes <name>.html and <name>.txt per message to outDir (default: the OS
- * temp directory). Sample names and a fake token only. Reads EMAIL_LOGO_URL and
+ * temp directory). Sample names and a fake token only. Reads EMAIL_BANNER_URL and
  * EMAIL_CONTACT from .env so the logo renders as it will in a real inbox.
  */
 import "dotenv/config"
