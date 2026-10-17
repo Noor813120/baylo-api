@@ -123,9 +123,6 @@ async function cleanup() {
   })
   await prisma.adminAction.deleteMany({ where: { targetId: { in: subs.map((s) => s.id) } } })
   await prisma.idVerification.deleteMany({ where: { userId: { in: ids } } })
-  await prisma.deferredContract.deleteMany({
-    where: { OR: [{ debtorId: { in: ids } }, { creditorId: { in: ids } }] },
-  })
   await prisma.leafTransaction.deleteMany({ where: { userId: { in: ids } } })
   await prisma.notification.deleteMany({
     where: { OR: [{ userId: { in: ids } }, { actorId: { in: ids } }] },
@@ -133,16 +130,13 @@ async function cleanup() {
   await prisma.message.deleteMany({
     where: { OR: [{ senderId: { in: ids } }, { receiverId: { in: ids } }] },
   })
-  await prisma.tradeRequest.deleteMany({
+  // Offers and trades: one Trade row per deal since schema v2.
+  await prisma.trade.deleteMany({
     where: { OR: [{ senderId: { in: ids } }, { receiverId: { in: ids } }] },
   })
-  await prisma.offer.deleteMany({
-    where: { OR: [{ senderId: { in: ids } }, { receiverId: { in: ids } }] },
-  })
-  await prisma.taskCompletion.deleteMany({ where: { userId: { in: ids } } })
-  await prisma.refreshToken.deleteMany({ where: { userId: { in: ids } } })
-  await prisma.emailVerificationToken.deleteMany({ where: { userId: { in: ids } } })
-  await prisma.itemImageHash.deleteMany({ where: { item: { userId: { in: ids } } } })
+  await prisma.leafTransaction.deleteMany({ where: { userId: { in: ids }, task: { not: null } } })
+  await prisma.authToken.deleteMany({ where: { userId: { in: ids } } })
+  await prisma.itemImage.deleteMany({ where: { item: { userId: { in: ids } } } })
   await prisma.item.deleteMany({ where: { userId: { in: ids } } })
   await prisma.user.deleteMany({ where: { id: { in: ids } } })
 }
@@ -168,7 +162,7 @@ async function makeUser(
 async function makeItem(userId: string, title: string) {
   return prisma.item.create({
     data: {
-      title, description: `${title} description`, images: "[]",
+      title, description: `${title} description`, 
       category: "BOOKS", condition: "GOOD", valueLeaves: 100,
       status: "AVAILABLE", userId,
     },
@@ -248,8 +242,9 @@ async function main() {
 
   // ACCEPTING a trade. The other (verified) party proposes; the unverified user
   // accepts. This is the one the spec is most explicit about.
-  const trade = await prisma.tradeRequest.create({
+  const trade = await prisma.trade.create({
     data: {
+      tradeCreatedAt: new Date(), // trade phase from the start (schema v2 CHECK)
       senderId: other.id,
       receiverId: unverified.id,
       offeredItemId: theirItem.id,
@@ -461,18 +456,12 @@ async function main() {
 
   // ── 10 ── suspension keeps the claim; deletion frees it
   head("10  suspension keeps the hash; deletion frees it")
-  await prisma.user.update({
-    where: { id: unverified.id },
-    data: { suspendedAt: new Date(), suspendedUntil: null },
-  })
+  await prisma.suspension.create({ data: { userId: unverified.id, level: 1, reason: "verify-id-verification" } })
   const stillClaimed = await prisma.idVerification.findUnique({
     where: { claimKey: hashIdNumber(ID_A) }, select: { id: true },
   })
   check("a SUSPENDED user's approved hash is still claimed", !!stillClaimed)
-  await prisma.user.update({
-    where: { id: unverified.id },
-    data: { suspendedAt: null, suspendedUntil: null },
-  })
+  await prisma.suspension.deleteMany({ where: { userId: unverified.id } })
 
   // Deletion goes through the real path so the summary and the row removal are
   // both exercised.

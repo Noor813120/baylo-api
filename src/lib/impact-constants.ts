@@ -10,7 +10,6 @@ export const ECO_FACTORS: Record<string, { co2Kg: number; waterL: number; wasteK
   TOYS:        { co2Kg: 2,   waterL: 80,   wasteKg: 0.4 },
   TOOLS:       { co2Kg: 4,   waterL: 120,  wasteKg: 2   },
   FOOD:        { co2Kg: 0.5, waterL: 500,  wasteKg: 1   },
-  SERVICES:    { co2Kg: 0,   waterL: 0,    wasteKg: 0   },
   OTHER:       { co2Kg: 2,   waterL: 100,  wasteKg: 1   },
 }
 

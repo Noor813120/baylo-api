@@ -2,6 +2,22 @@
 // npm install --save-dev prisma dotenv
 import "dotenv/config";
 import { defineConfig } from "prisma/config";
+import { refusal } from "./prisma/command-guard";
+
+// ── SCHEMA V2 GUARD, POST-CUTOVER FORM (feature/schema-v2-post-cutover) ─────
+// Before the cutover no Prisma command that touches a database could run
+// against `public`. After it, live must still be migratable, so on `public`
+// (and any non-scratch schema) only `migrate status | deploy | diff | resolve`
+// may run. `migrate reset`, `migrate dev`, `db push` and every other
+// database command stay refused there. On a schema_v2_* or scratch_* copy
+// everything runs. The rules live in prisma/command-guard.ts, which is tested
+// by scripts/schema-v2/test-post-cutover-guards.ts.
+// DO NOT MERGE THIS BRANCH until live has been migrated (docs/cutover-runbook.md §7).
+const refused = refusal(process.argv.slice(2), process.env["DATABASE_URL"]);
+if (refused) {
+  console.error(refused);
+  process.exit(1);
+}
 
 export default defineConfig({
   schema: "prisma/schema.prisma",

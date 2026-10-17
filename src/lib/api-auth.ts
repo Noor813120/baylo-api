@@ -3,7 +3,7 @@ import { NextResponse } from "next/server"
 import { auth } from "@root/auth"
 import prisma from "@/lib/prisma"
 import { verifyAccessToken } from "@/lib/auth-tokens"
-import { suspensionState } from "@/lib/moderation"
+import { suspensionState, activeSuspension } from "@/lib/moderation"
 
 /**
  * The single authentication entry point for every authenticated API route.
@@ -17,7 +17,7 @@ import { suspensionState } from "@/lib/moderation"
  *
  * TWO ACCOUNT STATES ARE REFUSED HERE, both by returning null:
  *   deleted    (deletedAt)   -- the account is gone; see the note on the column.
- *   suspended  (suspendedAt) -- a moderator has stopped this account acting.
+ *   suspended  (Suspension)  -- a moderator has stopped this account acting.
  *
  * Suspension is checked in this one place, and that is what makes it real. The
  * alternative -- a gate each write route opts into -- is a gate the next route
@@ -47,6 +47,11 @@ export interface AuthUser {
 
 export interface AuthSession {
   user: AuthUser
+  /**
+   * The refresh family behind a Bearer token: which signed-in device this is.
+   * null on the cookie path and on an access token minted before `sid` existed.
+   */
+  sid: string | null
 }
 
 /** Extracts the token from `Authorization: Bearer <token>`, if present. */
@@ -69,17 +74,31 @@ export async function resolveSession(): Promise<AuthSession | null> {
 
   if (token !== null) {
     // Bearer path. Presented-and-invalid stops here — see the note above.
-    const userId = await verifyAccessToken(token)
-    if (!userId) return null
+    const claims = await verifyAccessToken(token)
+    if (!claims) return null
+    const { userId, sid } = claims
 
     // The token proves who signed in; it does not prove the account still
     // exists. A deleted user must not stay authenticated for the remaining
     // life of an already-issued token.
+    //
+    // Nor does it prove the DEVICE is still signed in. A family revoked by a
+    // logout, "log out all other devices", a password reset or a replay must
+    // stop its access token now, not fifteen minutes from now. The check is a
+    // filter in this same lookup (an EXISTS in the one SELECT), not a second
+    // query, and it reads the (familyId) index. "Alive" is any unrevoked row in
+    // the family: a rotation stamps usedAt on the old row but never revokedAt,
+    // and every revocation path stamps revokedAt on all of them.
+    //
+    // No `sid` (a token minted before this check existed) skips it; such a
+    // token is at most fifteen minutes old.
     const user = await prisma.user.findUnique({
-      where: { id: userId },
+      where: sid
+        ? { id: userId, authTokens: { some: { type: "REFRESH", familyId: sid, revokedAt: null } } }
+        : { id: userId },
       select: {
         id: true, name: true, email: true, avatar: true,
-        role: true, deletedAt: true, suspendedAt: true, suspendedUntil: true,
+        role: true, deletedAt: true, suspensions: activeSuspension(),
       },
     })
     // A deleted account is not merely absent from listings — it must stop
@@ -92,7 +111,7 @@ export async function resolveSession(): Promise<AuthSession | null> {
     // test, so a suspension that has lapsed lets the user straight back in.
     if (suspensionState(user).suspended) return null
 
-    return { user: { id: user.id, name: user.name, email: user.email, image: user.avatar, role: user.role as Role } }
+    return { user: { id: user.id, name: user.name, email: user.email, image: user.avatar, role: user.role as Role }, sid }
   }
 
   // Cookie path — the web admin side.
@@ -103,7 +122,7 @@ export async function resolveSession(): Promise<AuthSession | null> {
   // long way, and the token itself carries no deletion state.
   const cookieUser = await prisma.user.findUnique({
     where: { id: session.user.id },
-    select: { role: true, deletedAt: true, suspendedAt: true, suspendedUntil: true },
+    select: { role: true, deletedAt: true, suspensions: activeSuspension() },
   })
   if (!cookieUser || cookieUser.deletedAt) return null
   // A 30-day NextAuth cookie outlives a suspension decision by a very long way,
@@ -119,6 +138,7 @@ export async function resolveSession(): Promise<AuthSession | null> {
       image: session.user.image ?? null,
       role: cookieUser.role as Role,
     },
+    sid: null,
   }
 }
 

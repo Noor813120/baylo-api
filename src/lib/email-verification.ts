@@ -40,6 +40,8 @@ function hashToken(raw: string): string {
 /**
  * Issues a fresh verification token and emails the link.
  *
+ * `baseUrl` is publicBaseUrl(req) from the calling route — see lib/public-url.
+ *
  * Returns false if the mail could not be sent. Callers on the registration path
  * treat that as non-fatal — see the note in the register route: an SMTP outage
  * must not cost the user their account, and /api/auth/resend-verification
@@ -54,7 +56,7 @@ export async function issueVerificationToken(user: {
   email: string
   name?: string | null
   isVerified?: boolean
-}): Promise<boolean> {
+}, baseUrl: string): Promise<boolean> {
   if (user.isVerified) return true
 
   const raw = crypto.randomBytes(32).toString("hex")
@@ -63,13 +65,20 @@ export async function issueVerificationToken(user: {
   // Purge first. Without this a resend leaves every previously mailed link
   // live, so "I lost the email, send another" quietly widens the window instead
   // of moving it.
-  await prisma.emailVerificationToken.deleteMany({ where: { userId: user.id } })
-  await prisma.emailVerificationToken.create({
-    data: { userId: user.id, tokenHash: hashToken(raw), expiresAt },
+  // AuthToken (schema v2): one table for every bearer secret, told apart by type.
+  await prisma.authToken.deleteMany({ where: { userId: user.id, type: "EMAIL_VERIFICATION" } })
+  await prisma.authToken.create({
+    data: { type: "EMAIL_VERIFICATION", userId: user.id, tokenHash: hashToken(raw), expiresAt },
   })
 
   // The raw token exists only here and in the email. Nothing writes it to a log.
-  const verifyUrl = `${process.env.NEXTAUTH_URL ?? ""}/api/auth/verify-email?token=${raw}`
+  //
+  // The link opens the confirm PAGE, not the API. Opening it spends nothing:
+  // the page shows a "Confirm my email" button and only that button's POST
+  // redeems the token. Mail scanners that pre-open every link in a message
+  // (Outlook Safe Links and friends) would otherwise verify the account — and
+  // burn the link — before the person ever saw it.
+  const verifyUrl = `${baseUrl}/auth/verify-email?token=${raw}`
 
   try {
     await sendVerificationEmail(user.email, verifyUrl, user.name)
@@ -102,18 +111,19 @@ export type ConsumeResult =
 export async function consumeVerificationToken(raw: string): Promise<ConsumeResult> {
   const tokenHash = hashToken(raw)
 
-  const record = await prisma.emailVerificationToken.findUnique({
+  const record = await prisma.authToken.findUnique({
     where: { tokenHash },
-    select: { userId: true, expiresAt: true },
+    select: { userId: true, expiresAt: true, type: true },
   })
-  if (!record) return { ok: false, reason: "invalid" }
+  // A hash of another token type is not a verification link.
+  if (!record || record.type !== "EMAIL_VERIFICATION") return { ok: false, reason: "invalid" }
 
   if (record.expiresAt < new Date()) {
-    await prisma.emailVerificationToken.deleteMany({ where: { tokenHash } })
+    await prisma.authToken.deleteMany({ where: { tokenHash, type: "EMAIL_VERIFICATION" } })
     return { ok: false, reason: "expired" }
   }
 
-  const claimed = await prisma.emailVerificationToken.deleteMany({ where: { tokenHash } })
+  const claimed = await prisma.authToken.deleteMany({ where: { tokenHash, type: "EMAIL_VERIFICATION" } })
   if (claimed.count !== 1) return { ok: false, reason: "invalid" }
 
   // Same entry point as both Google paths. Idempotent: verifying an account

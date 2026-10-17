@@ -72,6 +72,15 @@ try {
       $env:DATABASE_URL = $url
       npx prisma db push 2>&1 | Select-Object -Last 1
       if ($LASTEXITCODE -ne 0) { throw "db push failed" }
+      # db push builds an EMPTY Category table, and every listing insert needs
+      # one of its rows (foreign key). The migration seeds them on live; here
+      # nothing does unless we do (prisma/category-seed.ts).
+      npx tsx --env-file=.env scripts/seed-categories.ts
+      if ($LASTEXITCODE -ne 0) { throw "seed-categories failed" }
+      # db push creates no views either; the display views come from their
+      # migration files (scripts/create-display-views.ts).
+      npx tsx --env-file=.env scripts/create-display-views.ts
+      if ($LASTEXITCODE -ne 0) { throw "create-display-views failed" }
     }
   }
 
@@ -92,6 +101,13 @@ try {
   }
 
   if ($Dev) {
+    # -Dev alone does not create the schema. Serving one that is not there gets
+    # the startup gate's "not in the v2 layout (missing AuthToken, ... Trade)",
+    # which reads as a wrong-layout problem; say what is actually wrong.
+    $env:DATABASE_URL = $base
+    $exists = npx tsx scripts/scratch-schema-exists.ts $Name | Select-Object -Last 1
+    if ($LASTEXITCODE -ne 0) { throw "could not check whether schema $Name exists" }
+    if ($exists -ne "yes") { throw "schema $Name does not exist. Run -Push first: .\scripts\scratch.ps1 -Push -Name $Name" }
     $env:DATABASE_URL = $url
     Write-Host "  next dev on port $Port, schema $Name  (Ctrl+C to stop; schema is kept -- drop it with -Drop -Name $Name)`n"
     npx next dev -p $Port

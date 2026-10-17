@@ -3,6 +3,8 @@ import Image from "next/image"
 import Link from "next/link"
 import { auth } from "@root/auth"
 import prisma from "@/lib/prisma"
+import { asTradeRequest, asTrades, IN_TRADE_PHASE } from "@/lib/trade-row"
+import { ITEM_IMAGES, imageUrls } from "@/lib/item-images"
 import { formatDate, formatCategory, formatCondition } from "@/lib/utils"
 import AvatarImage from "@/components/AvatarImage"
 import { LeafRankBadge, TierBadge, StarRow } from "@/components/RepBadge"
@@ -14,15 +16,19 @@ export default async function ProfilePage() {
   const user = await prisma.user.findUnique({
     where: { id: session.user.id },
     include: {
-      items: { orderBy: { createdAt: "desc" } },
-      sentRequests: {
+      items: { orderBy: { createdAt: "desc" }, include: { images: ITEM_IMAGES } },
+      // Deals in their trade phase, newest trade first (schema v2: offers and
+      // trades are one Trade row; these lists were TradeRequests).
+      sentTrades: {
+        where: IN_TRADE_PHASE,
         include: { requestedItem: true, receiver: { select: { name: true } } },
-        orderBy: { createdAt: "desc" },
+        orderBy: { tradeCreatedAt: "desc" },
         take: 5,
       },
-      receivedRequests: {
+      receivedTrades: {
+        where: IN_TRADE_PHASE,
         include: { offeredItem: true, sender: { select: { name: true } } },
-        orderBy: { createdAt: "desc" },
+        orderBy: { tradeCreatedAt: "desc" },
         take: 5,
       },
       reviewsReceived: {
@@ -35,6 +41,8 @@ export default async function ProfilePage() {
   })
 
   if (!user) redirect("/auth/login")
+  const sentRequests = asTrades(user.sentTrades.map(asTradeRequest))
+  const receivedRequests = asTrades(user.receivedTrades.map(asTradeRequest))
 
   const isGoogleVerified = user.isVerified
   const ratingCount      = user._count.reviewsReceived
@@ -240,7 +248,7 @@ export default async function ProfilePage() {
         ) : (
           <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
             {user.items.map((item) => {
-              const imgs: string[] = JSON.parse(item.images || "[]")
+              const imgs: string[] = imageUrls(item.images)
               return (
                 <Link key={item.id} href={`/listings/${item.id}`} className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden hover:shadow-md transition-shadow">
                   <div className="relative h-36 bg-gray-100">
@@ -268,11 +276,11 @@ export default async function ProfilePage() {
       {/* ── Trade requests received ─────────────────────────────────────────── */}
       <section>
         <h2 className="text-lg font-bold mb-4">Trade Requests Received</h2>
-        {user.receivedRequests.length === 0 ? (
+        {receivedRequests.length === 0 ? (
           <div className="text-center py-8 bg-white rounded-2xl border border-gray-100 text-gray-400 text-sm">No requests yet.</div>
         ) : (
           <div className="space-y-3">
-            {user.receivedRequests.map((req) => (
+            {receivedRequests.map((req) => (
               <div key={req.id} className="bg-white rounded-2xl border border-gray-100 shadow-sm p-4 flex items-center justify-between gap-4">
                 <div>
                   <p className="text-sm font-medium text-gray-900">
@@ -292,11 +300,11 @@ export default async function ProfilePage() {
       {/* ── Trade requests sent ─────────────────────────────────────────────── */}
       <section>
         <h2 className="text-lg font-bold mb-4">Trade Requests Sent</h2>
-        {user.sentRequests.length === 0 ? (
+        {sentRequests.length === 0 ? (
           <div className="text-center py-8 bg-white rounded-2xl border border-gray-100 text-gray-400 text-sm">You haven&apos;t sent any requests yet.</div>
         ) : (
           <div className="space-y-3">
-            {user.sentRequests.map((req) => (
+            {sentRequests.map((req) => (
               <div key={req.id} className="bg-white rounded-2xl border border-gray-100 shadow-sm p-4 flex items-center justify-between gap-4">
                 <div>
                   <p className="text-sm font-medium text-gray-900">

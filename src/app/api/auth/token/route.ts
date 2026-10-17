@@ -3,7 +3,7 @@ import bcrypt from "bcryptjs"
 import prisma from "@/lib/prisma"
 import { issueTokenPair, toTokenUser } from "@/lib/auth-tokens"
 import { clientIp, enforceRateLimit } from "@/lib/rate-limit-config"
-import { suspensionState } from "@/lib/moderation"
+import { suspensionState, activeSuspension, suspendedBody, notifySuspensionEnded } from "@/lib/moderation"
 
 /**
  * POST /api/auth/token — email + password, in exchange for a token pair.
@@ -40,12 +40,26 @@ export async function POST(req: NextRequest) {
   const limited = enforceRateLimit("login", `${clientIp(req)}:${email}`)
   if (limited) return limited
 
-  const user = await prisma.user.findUnique({ where: { email } })
+  const user = await prisma.user.findUnique({ where: { email }, include: { suspensions: activeSuspension() } })
 
   // One message and one status for "no such user", "Google-only account with no
-  // password", and "wrong password" alike. Distinguishing them would turn this
-  // endpoint into an account-enumeration oracle.
-  if (!user?.password || !(await bcrypt.compare(password, user.password))) {
+  // password", "an organisation's backing row" and "wrong password" alike.
+  // Distinguishing them would turn this endpoint into an account-enumeration
+  // oracle.
+  //
+  // `isOrgAccount` is named EXPLICITLY here rather than left to the null
+  // password that already refuses it. An organisation's backing row is created
+  // with `password: null` and nothing ever sets one — but "nothing ever sets
+  // one" is a property of the code as it stands today, and this is the line
+  // that would have to be got wrong for an organisation to become a
+  // login-able account with no human owner and no recovery path. Two reasons
+  // to refuse, one of which is about what the row IS rather than about what
+  // happens to be stored on it. See @/lib/organizations.
+  if (
+    !user?.password ||
+    user.isOrgAccount ||
+    !(await bcrypt.compare(password, user.password))
+  ) {
     return NextResponse.json({ error: "Invalid email or password" }, { status: 401 })
   }
 
@@ -67,17 +81,10 @@ export async function POST(req: NextRequest) {
   }
   const suspension = suspensionState(user)
   if (suspension.suspended) {
-    return NextResponse.json(
-      {
-        error: suspension.indefinite
-          ? "This account has been suspended. Contact support if you think that is a mistake."
-          : `This account is suspended until ${suspension.until!.toLocaleDateString()}.`,
-        code: "ACCOUNT_SUSPENDED",
-        until: suspension.until,
-      },
-      { status: 403 },
-    )
+    return NextResponse.json(suspendedBody(suspension), { status: 403 })
   }
+  // Back after a suspension: say so, once. See notifySuspensionEnded().
+  await notifySuspensionEnded(prisma, user.id)
 
   const pair = await issueTokenPair(user.id)
   return NextResponse.json({ ...pair, user: toTokenUser(user) })

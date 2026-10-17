@@ -1,6 +1,7 @@
 import prisma from "@/lib/prisma"
-import { CATEGORY_LABEL, toWireCategory } from "@/lib/moderation"
+import { CATEGORY_LABEL, suspendedWhere, toWireCategory } from "@/lib/moderation"
 import { SAFE_ZONE_TYPE_LABELS, type SafeZoneTypeValue } from "@/lib/safe-zones"
+import { REPORT } from "@/lib/report-case"
 
 /**
  * The numbers behind /admin/reports.
@@ -325,7 +326,10 @@ export async function loadReportSummary(requestedDays: number): Promise<ReportSu
   const onlyAdmins = { role: "ADMIN" as const, deletedAt: null }
   const onlyDeleted = { deletedAt: { not: null } }
   const joinedInWindow = { createdAt: range }
-  const resolvedInWindow = { resolvedAt: range }
+  // Reports and listing appeals are both ModerationCase rows (schema v2);
+  // every count here names its type.
+  const reportsJoinedInWindow = { ...REPORT, createdAt: range }
+  const resolvedInWindow = { ...REPORT, decidedAt: range }
   const hidden = { moderationHiddenAt: { not: null } }
   // NOTE: this filters on createdAt, so it counts trades STARTED in the window
   // that are completed now. If TradeRequest has a completion timestamp, swap it
@@ -335,9 +339,9 @@ export async function loadReportSummary(requestedDays: number): Promise<ReportSu
   const decidedIds: ("APPROVED" | "REJECTED")[] = ["APPROVED", "REJECTED"]
   const decidedIdsInWindow = { status: { in: decidedIds }, reviewedAt: range }
   const approvedIdsInWindow = { status: "APPROVED" as const, reviewedAt: range }
-  const openAppeals = { status: "OPEN" as const }
-  const decidedAppealsInWindow = { decidedAt: range }
-  const overturnedAppealsInWindow = { status: "OVERTURNED" as const, decidedAt: range }
+  const openAppeals = { type: "LISTING_APPEAL" as const, status: "OPEN" as const }
+  const decidedAppealsInWindow = { type: "LISTING_APPEAL" as const, decidedAt: range }
+  const overturnedAppealsInWindow = { type: "LISTING_APPEAL" as const, status: "OVERTURNED" as const, decidedAt: range }
   const available = { status: "AVAILABLE" as const }
   const activeHubs = { isActive: true }
   const inactiveHubs = { isActive: false }
@@ -345,12 +349,9 @@ export async function loadReportSummary(requestedDays: number): Promise<ReportSu
   const plannedMeetups = { meetupHubId: { not: null } }
   const claimedMeetups = { safeZoneHubId: { not: null } }
 
-  // "Suspended right now". suspendedUntil === null means INDEFINITE, not
-  // "not suspended" -- see suspensionState() in @/lib/moderation. Both columns
-  // must therefore be tested together, or a lapsed suspension still counts.
-  const stillSuspended = { suspendedUntil: null }
-  const runningUntil = { suspendedUntil: { gt: to } }
-  const suspension = { deletedAt: null, suspendedAt: { not: null }, OR: [stillSuspended, runningUntil] }
+  // "Suspended at the end of the window" -- see activeSuspensionWhere() in
+  // @/lib/moderation for why a row existing is not enough.
+  const suspension = { deletedAt: null, ...suspendedWhere(to) }
 
   // ── Everything independent, in one round trip ───────────────────────
   // None of these reads depends on another, so they run together instead of as
@@ -410,24 +411,26 @@ export async function loadReportSummary(requestedDays: number): Promise<ReportSu
     prisma.item.count({ where: available }),
     prisma.item.count({ where: hidden }),
     prisma.item.count({ where: joinedInWindow }),
-    prisma.tradeRequest.count({ where: { status: "COMPLETED" } }),
-    prisma.tradeRequest.count({ where: completedInWindow }),
-    prisma.report.count({ where: joinedInWindow }),
-    prisma.report.count({ where: resolvedInWindow }),
+    prisma.trade.count({ where: { status: "COMPLETED" } }),
+    prisma.trade.count({ where: completedInWindow }),
+    prisma.moderationCase.count({ where: reportsJoinedInWindow }),
+    prisma.moderationCase.count({ where: resolvedInWindow }),
     prisma.idVerification.count({ where: pendingIds }),
     prisma.idVerification.count({ where: decidedIdsInWindow }),
     prisma.idVerification.count({ where: approvedIdsInWindow }),
-    prisma.listingAppeal.count({ where: openAppeals }),
-    prisma.listingAppeal.count({ where: decidedAppealsInWindow }),
-    prisma.listingAppeal.count({ where: overturnedAppealsInWindow }),
+    prisma.moderationCase.count({ where: openAppeals }),
+    prisma.moderationCase.count({ where: decidedAppealsInWindow }),
+    prisma.moderationCase.count({ where: overturnedAppealsInWindow }),
     prisma.safeZoneHub.count({ where: activeHubs }),
     prisma.safeZoneHub.count({ where: inactiveHubs }),
-    prisma.taskCompletion.count({ where: joinedInWindow }),
+    // Schema v2: task completions are the ledger rows with `task` set (denied
+    // 0-Leaf awards included, as TaskCompletion counted them).
+    prisma.leafTransaction.count({ where: { ...joinedInWindow, task: { not: null } } }),
     prisma.adminAction.count({ where: joinedInWindow }),
 
-    prisma.report.groupBy({ by: ["category"], where: joinedInWindow, _count: { id: true }, orderBy: { _count: { id: "desc" } } }),
-    prisma.report.groupBy({ by: ["status"], _count: { id: true } }),
-    prisma.taskCompletion.groupBy({ by: ["task"], where: joinedInWindow, _count: { id: true }, orderBy: { _count: { id: "desc" } } }),
+    prisma.moderationCase.groupBy({ by: ["category"], where: reportsJoinedInWindow, _count: { id: true }, orderBy: { _count: { id: "desc" } } }),
+    prisma.moderationCase.groupBy({ by: ["status"], where: REPORT, _count: { id: true } }),
+    prisma.leafTransaction.groupBy({ by: ["task"], where: { ...joinedInWindow, task: { not: null } }, _count: { id: true }, orderBy: { _count: { id: "desc" } } }),
     prisma.adminAction.groupBy({ by: ["action"], where: joinedInWindow, _count: { id: true }, orderBy: { _count: { id: "desc" } } }),
     prisma.item.groupBy({ by: ["category"], _count: { id: true }, orderBy: { _count: { id: "desc" } } }),
     prisma.item.groupBy({ by: ["condition"], _count: { id: true }, orderBy: { _count: { id: "desc" } } }),
@@ -437,13 +440,13 @@ export async function loadReportSummary(requestedDays: number): Promise<ReportSu
     // is where the parties SAID they met. Counting only one would answer half the
     // question, so both are counted and the page labels them separately.
     prisma.safeZoneHub.findMany({ select: { id: true, name: true, city: true, type: true, isActive: true } }),
-    prisma.tradeRequest.groupBy({ by: ["meetupHubId"], where: plannedMeetups, _count: { id: true }, orderBy: { _count: { id: "desc" } } }),
-    prisma.tradeRequest.groupBy({ by: ["safeZoneHubId"], where: claimedMeetups, _count: { id: true }, orderBy: { _count: { id: "desc" } } }),
+    prisma.trade.groupBy({ by: ["meetupHubId"], where: plannedMeetups, _count: { id: true }, orderBy: { _count: { id: "desc" } } }),
+    prisma.trade.groupBy({ by: ["safeZoneHubId"], where: claimedMeetups, _count: { id: true }, orderBy: { _count: { id: "desc" } } }),
 
     prisma.review.aggregate({ where: joinedInWindow, _avg: { rating: true }, _count: { id: true } }),
 
     prisma.leafTransaction.findMany({ where: leavesInWindow, select: { amount: true, eventAt: true } }),
-    prisma.report.findMany({ where: joinedInWindow, select: { createdAt: true, resolvedAt: true } }),
+    prisma.moderationCase.findMany({ where: reportsJoinedInWindow, select: { createdAt: true, decidedAt: true } }),
     prisma.user.findMany({ where: joinedInWindow, select: { createdAt: true } }),
 
     prisma.adminAction.groupBy({ by: ["actorId"], where: joinedInWindow, _count: { id: true }, orderBy: { _count: { id: "desc" } }, take: 10 }),
@@ -566,9 +569,9 @@ export async function loadReportSummary(requestedDays: number): Promise<ReportSu
   let cohortResolved = 0
   const resolutionHours: number[] = []
   for (const row of reportRows) {
-    if (row.resolvedAt) {
+    if (row.decidedAt) {
       cohortResolved += 1
-      resolutionHours.push(Math.max(0, (row.resolvedAt.getTime() - row.createdAt.getTime()) / HOUR_MS))
+      resolutionHours.push(Math.max(0, (row.decidedAt.getTime() - row.createdAt.getTime()) / HOUR_MS))
     }
   }
   const rate = reportRows.length > 0 ? Math.round((cohortResolved / reportRows.length) * 100) : null
@@ -600,10 +603,11 @@ export async function loadReportSummary(requestedDays: number): Promise<ReportSu
   }
 
   const reportsByCategory = mergeByLabel(
-    byCategory.map((row) => ({ label: CATEGORY_LABEL[toWireCategory(row.category)], value: row._count.id })),
+    // REPORT rows always carry a category (ModerationCase_report_shape_check).
+    byCategory.map((row) => ({ label: CATEGORY_LABEL[toWireCategory(row.category!)], value: row._count.id })),
   )
   const reportsByStatus: SeriesPoint[] = byStatus.map((row) => ({ key: row.status, label: humanise(row.status), value: row._count.id }))
-  const tasksCompleted: SeriesPoint[] = byTask.map((row) => ({ key: row.task, label: humanise(row.task), value: row._count.id }))
+  const tasksCompleted: SeriesPoint[] = byTask.flatMap((row) => (row.task ? [{ key: row.task, label: humanise(row.task), value: row._count.id }] : []))
   const actionsByKind: SeriesPoint[] = byAction.map((row) => ({ key: row.action, label: humanise(row.action), value: row._count.id }))
   const listingsByCategory: SeriesPoint[] = listingsByCategoryRaw.map((row) => ({ key: row.category, label: humanise(row.category), value: row._count.id }))
   const listingsByCondition: SeriesPoint[] = listingsByConditionRaw.map((row) => ({ key: row.condition, label: humanise(row.condition), value: row._count.id }))

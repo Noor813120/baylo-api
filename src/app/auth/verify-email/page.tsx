@@ -1,152 +1,138 @@
-"use client"
+import { VERIFY_CREDIT_LEAVES } from "@/lib/task-constants"
+import {
+  BackToApp,
+  Em,
+  LandingBody,
+  LandingHeading,
+  LandingHelp,
+  LandingShell,
+  SubmitButton,
+  param,
+} from "../_components/EmailLanding"
 
-import Link from "next/link"
-import { Suspense } from "react"
-import { useSearchParams } from "next/navigation"
+/**
+ * Where the verification email's link lands.
+ *
+ * OPENING THIS PAGE VERIFIES NOTHING. The token sits in the address bar and in
+ * a hidden field, unspent, until the person presses "Confirm my email" — a
+ * plain form POST to /api/auth/verify-email, which redeems it and answers 303
+ * back here with `?status=`. Mail scanners and link previews open every link
+ * in a message; a link that verified on open would be spent, and the account
+ * verified, by a machine before the person saw it.
+ *
+ * A SERVER COMPONENT WITH NO CLIENT CODE. The button works whether or not the
+ * page hydrates — see the note in _components/EmailLanding.tsx.
+ *
+ * `status` and `leaves` in the URL are display only: anyone can type them, and
+ * all they change is which sentence this page prints. The account changes only
+ * through the POST.
+ */
 
-function ArrowIcon() {
+type Props = { searchParams: Promise<Record<string, string | string[] | undefined>> }
+
+const RESEND = (
+  <>
+    open the Baylo app and tap <Em>Resend email</Em> on the verify reminder
+  </>
+)
+
+function ConfirmForm({ token, label }: { token: string; label: string }) {
   return (
-    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M5 12h13M13 6l6 6-6 6" />
-    </svg>
+    <form method="post" action="/api/auth/verify-email">
+      <input type="hidden" name="token" value={token} />
+      <SubmitButton>{label}</SubmitButton>
+    </form>
   )
 }
 
-function VerifyEmailContent() {
-  const params = useSearchParams()
-  const status = params.get("status")
-  const reason = params.get("reason")
-  const email = params.get("email")
-  const sent = params.get("sent") === "1"
+export default async function VerifyEmailPage({ searchParams }: Props) {
+  const sp = await searchParams
+  const status = param(sp, "status")
+  const token = param(sp, "token")
 
-  const isSuccess = status === "success"
-  const isError = status === "error"
+  let content
+  switch (status) {
+    case "verified": {
+      const leaves = Number.parseInt(param(sp, "leaves"), 10)
+      content = (
+        <>
+          <LandingHeading>You&rsquo;re verified</LandingHeading>
+          <LandingBody>
+            Your email is verified.
+            {leaves > 0 && leaves <= 10_000 ? ` ${leaves} welcome Leaves are in your balance.` : ""}
+          </LandingBody>
+          <BackToApp />
+        </>
+      )
+      break
+    }
+    case "already":
+      content = (
+        <>
+          <LandingHeading>Already verified</LandingHeading>
+          <LandingBody>
+            This email was already confirmed, so there&rsquo;s nothing else to do. Your welcome Leaves were added the
+            first time.
+          </LandingBody>
+          <BackToApp />
+        </>
+      )
+      break
+    case "expired":
+      content = (
+        <>
+          <LandingHeading>This link has expired</LandingHeading>
+          <LandingBody>Verification links last 24 hours. To get a new one, {RESEND}.</LandingBody>
+          <BackToApp label="Open the Baylo app" />
+        </>
+      )
+      break
+    case "server":
+      content = (
+        <>
+          <LandingHeading>Something went wrong</LandingHeading>
+          <LandingBody>We couldn&rsquo;t check your link just now. That&rsquo;s on our side. Try again in a moment.</LandingBody>
+          {token ? <ConfirmForm token={token} label="Try again" /> : null}
+          <LandingHelp>Still not working? To get a new link, {RESEND}.</LandingHelp>
+        </>
+      )
+      break
+    default:
+      if (status !== "invalid" && token) {
+        content = (
+          <>
+            <LandingHeading>Confirm your email</LandingHeading>
+            <LandingBody>Confirm your email to get your {VERIFY_CREDIT_LEAVES} welcome Leaves.</LandingBody>
+            <ConfirmForm token={token} label="Confirm my email" />
+            <LandingHelp>This link expires 24 hours after it was sent.</LandingHelp>
+          </>
+        )
+      } else if (status !== "invalid" && param(sp, "sent") === "1") {
+        // The web signup's own "we sent it" screen. Nothing to confirm here.
+        const email = param(sp, "email")
+        content = (
+          <>
+            <LandingHeading>Check your email</LandingHeading>
+            <LandingBody>
+              We sent a link to {email ? <Em>{email}</Em> : "your email"}. Open it and tap the button to get your{" "}
+              {VERIFY_CREDIT_LEAVES} welcome Leaves.
+            </LandingBody>
+            <BackToApp />
+          </>
+        )
+      } else {
+        content = (
+          <>
+            <LandingHeading>This link didn&rsquo;t work</LandingHeading>
+            <LandingBody>
+              It has already been used or isn&rsquo;t complete. If you already confirmed your email, you&rsquo;re all
+              set. If not, {RESEND}.
+            </LandingBody>
+            <BackToApp label="Open the Baylo app" />
+          </>
+        )
+      }
+  }
 
-  return (
-    <div style={{
-      minHeight: "100svh",
-      display: "grid",
-      placeItems: "center",
-      padding: "40px 20px",
-      background: "radial-gradient(circle at top, rgba(57,161,90,0.12), transparent 35%), var(--bg)",
-    }}>
-      <div style={{
-        width: "100%",
-        maxWidth: 560,
-        background: "var(--card)",
-        border: "1px solid var(--line)",
-        borderRadius: 24,
-        boxShadow: "0 24px 80px rgba(17,24,15,0.12)",
-        padding: "clamp(28px, 5vw, 52px)",
-      }}>
-        <div style={{
-          width: 66,
-          height: 66,
-          borderRadius: 18,
-          display: "grid",
-          placeItems: "center",
-          marginBottom: 22,
-          background: isSuccess ? "var(--accent)" : isError ? "#d95a5a" : "var(--card-alt)",
-          color: isSuccess ? "var(--on-accent)" : "#fff",
-        }}>
-          {isSuccess ? (
-            <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round">
-              <path d="m5 12 5 5L19 3" />
-            </svg>
-          ) : (
-            <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-              <circle cx="12" cy="12" r="9" />
-              <path d="M12 7v6" />
-              <path d="M12 17h.01" />
-            </svg>
-          )}
-        </div>
-
-        <p className="kicker" style={{ marginBottom: 10 }}>
-          {isSuccess ? "Email verified" : isError ? "Verification issue" : sent ? "Check your inbox" : "Verify your email"}
-        </p>
-
-        <h1 style={{
-          margin: 0,
-          fontFamily: "var(--ff)",
-          fontWeight: 800,
-          fontStretch: "125%",
-          fontSize: "clamp(28px, 4vw, 48px)",
-          lineHeight: 0.96,
-          letterSpacing: "-0.03em",
-          textTransform: "uppercase",
-          color: "var(--text)",
-        }}>
-          {isSuccess ? (
-            <>
-              You&rsquo;re all<br />
-              <span style={{ color: "var(--accent)" }}>set.</span>
-            </>
-          ) : isError ? (
-            <>
-              That link<br />
-              <span style={{ color: "var(--accent)" }}>didn&rsquo;t work.</span>
-            </>
-          ) : (
-            <>
-              Check your<br />
-              <span style={{ color: "var(--accent)" }}>inbox.</span>
-            </>
-          )}
-        </h1>
-
-        <p style={{
-          marginTop: 18,
-          fontSize: 15,
-          lineHeight: 1.6,
-          color: "var(--muted)",
-        }}>
-          {isSuccess ? (
-            <>Your email is now confirmed. You can continue to Baylo and start trading.</>
-          ) : isError ? (
-            reason === "expired"
-              ? "This link expired. Send a fresh verification email and we’ll walk you back through the setup step."
-              : "This link is invalid or has already been used. You can request a new one and continue from there."
-          ) : email ? (
-            <>We sent a verification email to <strong style={{ color: "var(--text)" }}>{email}</strong>. Open it and follow the link to finish creating your account.</>
-          ) : (
-            <>We sent a verification email. Open it and follow the link to finish creating your account.</>
-          )}
-        </p>
-
-        <div style={{
-          display: "flex",
-          flexWrap: "wrap",
-          gap: 12,
-          marginTop: 28,
-        }}>
-          {isSuccess ? (
-            <Link href="/dashboard" className="btn solid" style={{ fontSize: 14 }}>
-              <span>Go to Baylo</span>
-              <span className="arrow"><ArrowIcon /></span>
-            </Link>
-          ) : (
-            <Link href="/auth/login" className="btn solid" style={{ fontSize: 14 }}>
-              <span>Back to Baylo</span>
-              <span className="arrow"><ArrowIcon /></span>
-            </Link>
-          )}
-
-          {isError && (
-            <Link href="/auth/register" className="btn" style={{ fontSize: 14 }}>
-              <span>Create account again</span>
-            </Link>
-          )}
-        </div>
-      </div>
-    </div>
-  )
-}
-
-export default function VerifyEmailPage() {
-  return (
-    <Suspense>
-      <VerifyEmailContent />
-    </Suspense>
-  )
+  return <LandingShell>{content}</LandingShell>
 }

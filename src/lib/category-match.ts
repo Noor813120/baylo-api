@@ -1,0 +1,485 @@
+import type { PrismaClient } from "@/generated/prisma/client"
+import prisma from "@/lib/prisma"
+import { notifyUser } from "@/lib/realtime"
+import { categoryLabel } from "@/lib/v1/taxonomy"
+import { userNotBlocked } from "@/lib/blocking"
+import { notSuspendedWhere } from "@/lib/moderation"
+
+/**
+ * Category overlap: the one definition of it, and the event-triggered path
+ * that turns it into a notification.
+ *
+ * ── WHAT WAS HERE BEFORE ────────────────────────────────────────────────────
+ *
+ * Nothing — which is the point. "Both trading Electronics" was computed in two
+ * places, GET /api/matches and GET /api/v1/home, from copy-pasted code that had
+ * already drifted: one says "Has Books & Media you might like" and the other
+ * "Has Books & Media you might like" off a differently-derived `top`, and the
+ * fallback sentence for a user with no items differs between them outright.
+ * Both now call `sharedCategories()` and `matchReason()` below, so the third
+ * caller — the new event-triggered path — is not a third copy.
+ *
+ * ── PULL VS PUSH ────────────────────────────────────────────────────────────
+ *
+ * Those two callers are PULL: you open the app and it asks "who overlaps with
+ * me". `notifyCategoryMatches()` is PUSH: a listing is created and the people
+ * who said they wanted that category are told. Same comparison, opposite
+ * direction, and deliberately the same module so they cannot come to disagree
+ * about what an overlap is.
+ *
+ * ── ONE-DIRECTIONAL, AND WHY — READ THIS BEFORE "FIXING" IT ─────────────────
+ *
+ * The strict rule is MUTUAL: notify the owner of item B about new item A only
+ * when A.category ∈ B.lookingForCategories AND B.category ∈
+ * A.lookingForCategories. It is the better rule and it is not the launch rule,
+ * for one blunt reason: `lookingForCategories` shipped empty. Every row that
+ * predates the column reads `[]`, and a mutual test requires BOTH sides to have
+ * filled it in — so for as long as it takes the field to spread through the
+ * listing base, a mutual matcher notifies almost nobody about almost nothing,
+ * and a feature that does nothing for its first months is one nobody fills the
+ * field in for. The rule is self-defeating at exactly the moment it has to work.
+ *
+ * So the launch rule is one-directional AND ANCHORED ON THE RECIPIENT:
+ *
+ *      A.category ∈ B.owner's lookingForCategories
+ *
+ * which is to say — you are told because YOU said you wanted this category.
+ * That direction is chosen and not arbitrary. The other one-directional
+ * reading (B.category ∈ A.lookingForCategories: "tell people who own what the
+ * new poster wants") notifies people who never asked for anything, off a
+ * stranger's preference, which is a spam engine with a matching feature
+ * attached.
+ *
+ * THE TRADE-OFF, PLAINLY: a one-directional match can be uninteresting to the
+ * person notified — they wanted Electronics, this IS Electronics, but the
+ * poster does not want what they have, so nothing may come of it. That is a
+ * weaker signal than a mutual match and it is a signal the recipient opted
+ * into. Mutual matches are strictly better, so they are not discarded: they
+ * sort FIRST (see `mutual` below) and the message says so. When the field is
+ * widely populated, tightening this to a filter is a one-line change and the
+ * sort order is already the evidence for whether it is safe.
+ */
+
+// ── The primitive ────────────────────────────────────────────────────────────
+
+/**
+ * The categories two sets have in common, in the order of the first.
+ *
+ * Order matters to the caller: the sentence names `shared[0]`, so a stable
+ * order means the same pair of users gets the same sentence twice rather than
+ * whichever category the Set happened to yield first.
+ */
+export function sharedCategories(
+  mine: readonly string[],
+  theirs: readonly string[],
+): string[] {
+  if (mine.length === 0 || theirs.length === 0) return []
+  const set = new Set(theirs)
+  const out: string[] = []
+  for (const c of mine) if (set.has(c) && !out.includes(c)) out.push(c)
+  return out
+}
+
+/**
+ * The sentence shown under a suggested trading partner.
+ *
+ * Extracted from the two routes that each had their own copy. `top` is the
+ * candidate's most prominent category and is used only when nothing is shared;
+ * with neither, the candidate has no listings worth describing.
+ */
+export function matchReason(shared: readonly string[], top: string | null | undefined): string {
+  if (shared.length > 0) return `Both trading ${categoryLabel(shared[0])}`
+  if (top) return `Has ${categoryLabel(top)} you might like`
+  return "New to Baylo"
+}
+
+// ── The event-triggered path ─────────────────────────────────────────────────
+
+/**
+ * How many people one new listing may notify.
+ *
+ * A CAP, NOT A PAGE SIZE. "FOOD" is a category thousands of listings name, and
+ * without a ceiling a single post fans out into a write per matching owner plus
+ * a Pusher call each — on the listing-creation path, which is a hot write. The
+ * cap makes the cost of posting an item bounded and independent of how popular
+ * the category is.
+ *
+ * Whom it drops when it binds is decided by the ordering in the query below:
+ * mutual matches first, then most recently active. So the people cut are the
+ * least-interested and least-active, which is the right end to cut from.
+ */
+export const MATCH_NOTIFY_CAP = 25
+
+/** One matched listing, and why it matched. */
+export interface CategoryMatch {
+  itemId: string
+  ownerId: string
+  category: string
+  /** True when the overlap runs BOTH ways. Sorted first; worded differently. */
+  mutual: boolean
+}
+
+/**
+ * Find the listings whose owners asked for this item's category.
+ *
+ * ── WHAT IS EXCLUDED, AND WHY EACH ──────────────────────────────────────────
+ *
+ *   the poster's own items   you are not a match for yourself, and an org's
+ *                            backing row posting means `authorUserId` is the
+ *                            org — so this excludes the ORG's other listings,
+ *                            which is right, and not the staff member's own.
+ *   non-AVAILABLE            IN_TRADE, PENDING_REVIEW, VALUE_REJECTED and
+ *                            EXPIRED are all listings nobody can act on.
+ *   moderator takedowns      `moderationHiddenAt` — invisible means invisible,
+ *                            including to the matcher.
+ *   blocked, either way      the single most conspicuous way a half-enforced
+ *                            block announces itself is a notification.
+ *   suspended owners         a suspended account cannot trade, so telling them
+ *                            about a listing is an invitation to a wall.
+ *   empty preferences        `hasSome: []` is FALSE in Postgres, so a row with
+ *                            no stated preference simply does not match. It is
+ *                            not treated as "wants everything", which is the
+ *                            reading that would turn this into a broadcast.
+ *
+ * ONE ROW PER OWNER. `distinct` on ownerId, because a person with six Food
+ * listings asked to be told about Food once, not six times.
+ */
+export async function findCategoryMatches(
+  db: Pick<PrismaClient, "item">,
+  input: {
+    itemId: string
+    authorUserId: string
+    category: string
+    lookingForCategories: readonly string[]
+  },
+): Promise<CategoryMatch[]> {
+  const rows = await db.item.findMany({
+    where: {
+      id: { not: input.itemId },
+      userId: { not: input.authorUserId },
+      status: "AVAILABLE",
+      moderationHiddenAt: null,
+      // The recipient's stated want. THE DIRECTION — see the header.
+      // ItemWantedCategory rows since schema v2 (was the array `has`).
+      wantedCategories: { some: { category: input.category as never } },
+      user: {
+        deletedAt: null,
+        ...userNotBlocked(input.authorUserId),
+        ...notSuspendedWhere(),
+      },
+    },
+    select: { id: true, userId: true, category: true },
+    distinct: ["userId"],
+    // Most recently touched first. The cap cuts from the other end, so what is
+    // dropped is the least active — see MATCH_NOTIFY_CAP. Mutual matches are
+    // promoted after the fetch rather than in the ORDER BY, because "is my
+    // category in THEIR list" is a per-row test the database cannot express as
+    // a sort key without a second index it would not otherwise need.
+    orderBy: { updatedAt: "desc" },
+    // Over-fetch so the mutual promotion has something to promote FROM. Without
+    // this the cap is applied before the sort and a mutual match sitting at
+    // position 26 is lost to a one-directional one at 25.
+    take: MATCH_NOTIFY_CAP * 4,
+  })
+
+  const wanted = new Set(input.lookingForCategories)
+  return rows
+    .map((r) => ({
+      itemId: r.id,
+      ownerId: r.userId,
+      category: r.category as string,
+      mutual: wanted.has(r.category as string),
+    }))
+    .sort((a, b) => Number(b.mutual) - Number(a.mutual))
+    .slice(0, MATCH_NOTIFY_CAP)
+}
+
+// ── Perishables: both directions ─────────────────────────────────────────────
+
+/**
+ * How many people one new PERISHABLE listing may notify.
+ *
+ * Higher than MATCH_NOTIFY_CAP because a perishable is gone in hours: a person
+ * cut by the cap has no later chance to find it. At 25 the cap bound on the
+ * live DB on 2 Oct 2026, where 50 revived demo Food listings with fresh
+ * `updatedAt` took every slot and no real account was told about a real post.
+ */
+export const PERISHABLE_MATCH_NOTIFY_CAP = 100
+
+/**
+ * Why a recipient matched a perishable. Sorted in this order.
+ *
+ *   mutual   both of the below
+ *   has      one of their listings is a category the poster said they want
+ *            back — they can offer it (the rule the perishable flow is for)
+ *   wants    one of their listings asks for the new listing's category (the
+ *            standard rule above)
+ */
+export type PerishableMatchReason = "mutual" | "has" | "wants"
+
+export interface PerishableMatch {
+  ownerId: string
+  reason: PerishableMatchReason
+  /** For "has"/"mutual": the recipient's listing whose category the poster wants. */
+  hasItemId: string | null
+  hasCategory: string | null
+  /** For "wants"/"mutual": the recipient's listing that asks for this category. */
+  wantsItemId: string | null
+}
+
+const REASON_RANK: Record<PerishableMatchReason, number> = { mutual: 0, has: 1, wants: 2 }
+
+/**
+ * Everything a recipient's listing must be, whichever rule it matched by.
+ * The same exclusions as findCategoryMatches() — see the table above it — plus
+ * SHOPS: a shop's bell filters CATEGORY_MATCH out (@/lib/inbox), so a row
+ * addressed to an org's backing account is one nobody can ever see, and under a
+ * cap it takes a slot from a person who could.
+ */
+export function perishableRecipientWhere(input: { itemId: string; authorUserId: string }) {
+  return {
+    id: { not: input.itemId },
+    userId: { not: input.authorUserId },
+    status: "AVAILABLE" as const,
+    moderationHiddenAt: null,
+    user: {
+      deletedAt: null,
+      isOrgAccount: false,
+      ...userNotBlocked(input.authorUserId),
+      ...notSuspendedWhere(),
+    },
+  }
+}
+
+/**
+ * Find the people to tell about a new PERISHABLE listing. Either direction
+ * qualifies — a perishable is offered for what the poster wants back, so the
+ * owners of those categories are the people who can act before it expires.
+ * Standard listings keep the one-directional rule; see the header for why.
+ *
+ * One row per owner, each owner's most recently touched listing standing for
+ * them in each direction.
+ */
+export async function findPerishableMatches(
+  db: Pick<PrismaClient, "item">,
+  input: {
+    itemId: string
+    authorUserId: string
+    category: string
+    lookingForCategories: readonly string[]
+  },
+): Promise<PerishableMatch[]> {
+  const base = perishableRecipientWhere(input)
+  const fetch = PERISHABLE_MATCH_NOTIFY_CAP * 4
+  const [hasRows, wantsRows] = await Promise.all([
+    input.lookingForCategories.length > 0
+      ? db.item.findMany({
+          where: { ...base, category: { in: input.lookingForCategories as never } },
+          select: { id: true, userId: true, category: true, updatedAt: true },
+          distinct: ["userId"],
+          orderBy: { updatedAt: "desc" },
+          take: fetch,
+        })
+      : Promise.resolve([]),
+    db.item.findMany({
+      where: { ...base, wantedCategories: { some: { category: input.category as never } } },
+      select: { id: true, userId: true, updatedAt: true },
+      distinct: ["userId"],
+      orderBy: { updatedAt: "desc" },
+      take: fetch,
+    }),
+  ])
+
+  const byOwner = new Map<string, PerishableMatch & { touched: number }>()
+  for (const r of hasRows) {
+    byOwner.set(r.userId, {
+      ownerId: r.userId,
+      reason: "has",
+      hasItemId: r.id,
+      hasCategory: r.category as string,
+      wantsItemId: null,
+      touched: r.updatedAt.getTime(),
+    })
+  }
+  for (const r of wantsRows) {
+    const seen = byOwner.get(r.userId)
+    if (seen) {
+      seen.reason = "mutual"
+      seen.wantsItemId = r.id
+      seen.touched = Math.max(seen.touched, r.updatedAt.getTime())
+    } else {
+      byOwner.set(r.userId, {
+        ownerId: r.userId,
+        reason: "wants",
+        hasItemId: null,
+        hasCategory: null,
+        wantsItemId: r.id,
+        touched: r.updatedAt.getTime(),
+      })
+    }
+  }
+
+  return [...byOwner.values()]
+    .sort((a, b) => REASON_RANK[a.reason] - REASON_RANK[b.reason] || b.touched - a.touched)
+    .slice(0, PERISHABLE_MATCH_NOTIFY_CAP)
+    .map(({ touched: _touched, ...m }) => m)
+}
+
+/**
+ * The perishable sentence. Leads with the window, because the window is the
+ * news: "ends in 6 hours" is why this is worth an interruption at all.
+ */
+export function perishableMatchMessage(
+  newCategory: string,
+  hours: number | null,
+  m: Pick<PerishableMatch, "reason" | "hasCategory">,
+): string {
+  const mine = categoryLabel(newCategory)
+  const head = hours != null ? `New ${mine} listing, ends in ${hours} hours.` : `New ${mine} listing, time-limited.`
+  const theirs = m.hasCategory ? categoryLabel(m.hasCategory) : null
+  if (m.reason === "mutual") return `${head} They want ${theirs}, which you have, and you're looking for ${mine}.`
+  if (m.reason === "has") return `${head} They want ${theirs}, which you have.`
+  return `${head} You're looking for ${mine}.`
+}
+
+/**
+ * The message the recipient reads.
+ *
+ * It names BOTH categories, because a notification that says only "new Food
+ * listing" does not explain why this person is being told. The second half —
+ * "you have a Plants listing" — is the reason, and a notification whose reason
+ * is not in its own text is one people turn off.
+ *
+ * "near you" is in the spec's wording and is NOT in this sentence. Nothing in
+ * this query is geographic: matches are by category across the whole
+ * marketplace, and `pickupLat`/`pickupLng` are not consulted. Writing "near
+ * you" would be a claim the code does not make, on the one surface where a
+ * user cannot check it.
+ */
+export function matchMessage(newCategory: string, theirCategory: string, mutual: boolean): string {
+  const theirs = categoryLabel(theirCategory)
+  const mine = categoryLabel(newCategory)
+  return mutual
+    ? `New ${mine} listing — and they're looking for ${theirs}, which you have`
+    : `New ${mine} listing — you have a ${theirs} listing`
+}
+
+/**
+ * Notify everyone who asked for this item's category. Fire-and-forget.
+ *
+ * ── IT NEVER BLOCKS THE CREATE ──────────────────────────────────────────────
+ *
+ * Same contract as `awardTaskAsync`, and for a stronger reason: this does up to
+ * MATCH_NOTIFY_CAP writes and the same number of Pusher calls, and not one of
+ * them is worth failing a listing creation over. A caller that awaits this has
+ * made posting an item as slow as the slowest of twenty-five network calls.
+ * Call it with `void`.
+ *
+ * New notification rows go in ONE createMany — twenty-five round trips to write
+ * twenty-five rows is the shape this deliberately avoids — and the Pusher calls
+ * then fan out, each catching its own failure. A dropped push is a notification
+ * the client picks up on its next poll; a dropped row is one that never existed.
+ * That is why the row is written first and the push is best-effort.
+ */
+export function notifyCategoryMatchesAsync(input: {
+  itemId: string
+  authorUserId: string
+  category: string
+  lookingForCategories: readonly string[]
+  /** Perishables match in both directions, to a larger cap; see findPerishableMatches(). */
+  isPerishable?: boolean
+  tradeWithinHours?: number | null
+}): void {
+  // Nothing to do for a listing whose category nobody could have asked for by
+  // name, and nothing to do before the row is visible to the matcher's query.
+  void (async () => {
+    const matches: { ownerId: string; message: string }[] = input.isPerishable
+      ? (await findPerishableMatches(prisma, input)).map((m) => ({
+          ownerId: m.ownerId,
+          message: perishableMatchMessage(input.category, input.tradeWithinHours ?? null, m),
+        }))
+      : (await findCategoryMatches(prisma, input)).map((m) => ({
+          ownerId: m.ownerId,
+          message: matchMessage(input.category, m.category, m.mutual),
+        }))
+    if (matches.length === 0) return
+
+    const rows = matches.map((m) => ({
+      userId: m.ownerId,
+      type: "CATEGORY_MATCH" as const,
+      message: m.message,
+      // The NEW listing, which is the only useful destination. "item" is a
+      // new routing token — not "trade", not "conversation"; see the note on
+      // Notification.entityType.
+      entityType: "item",
+      entityId: input.itemId,
+      // NO ACTOR. `actorId` is "the person who did this to you", and nobody
+      // did anything to the recipient — they posted an item to the
+      // marketplace. Setting it would put the poster's face on a
+      // notification they did not send, and would let one account spam a
+      // recipient's actor-grouped list by posting repeatedly.
+      link: `/listings/${input.itemId}`,
+    }))
+
+    // ── ONE UNREAD ROW PER SENTENCE, NOT ONE PER LISTING ─────────────────
+    //
+    // A shop that posts nine Food listings in ten minutes used to hand every
+    // Food-wanter nine rows reading "New Food listing — you have a Food
+    // listing", identical down to the timestamp bucket (24 Sep 2026: nine on
+    // one real account). Each row was individually correct and the list was
+    // spam. So when the recipient already has an UNREAD match notification
+    // with the same text, that row is moved to the newest listing and brought
+    // back to the top instead of a sibling being added beside it. Once they
+    // have read it, the next listing earns a new row as before.
+    //
+    // Keyed on the message, not a category column, because the message IS
+    // what the recipient sees twice — and it already encodes both categories
+    // and the mutual flag. Two posts racing past this check can still both
+    // insert; that is the rare case and the cap still bounds it.
+    const unread = await prisma.notification.findMany({
+      where: {
+        type: "CATEGORY_MATCH",
+        read: false,
+        userId: { in: rows.map((r) => r.userId) },
+        message: { in: [...new Set(rows.map((r) => r.message))] },
+      },
+      select: { id: true, userId: true, message: true },
+      orderBy: { createdAt: "desc" },
+    })
+    const matchKey = (n: { userId: string; message: string }) => `${n.userId}:${n.message}`
+    const existing = new Map<string, string>()
+    for (const n of unread) {
+      if (!existing.has(matchKey(n))) existing.set(matchKey(n), n.id)
+    }
+
+    const fresh = rows.filter((r) => !existing.has(matchKey(r)))
+    const bumped = rows.flatMap((r) => {
+      const id = existing.get(matchKey(r))
+      return id ? [{ id, entityId: r.entityId, link: r.link }] : []
+    })
+
+    if (fresh.length > 0) {
+      await prisma.notification.createMany({ data: fresh })
+    }
+    if (bumped.length > 0) {
+      await prisma.$transaction(
+        bumped.map((b) =>
+          prisma.notification.update({
+            where: { id: b.id },
+            data: { entityId: b.entityId, link: b.link, createdAt: new Date() },
+          }),
+        ),
+      )
+    }
+
+    // One trigger that threw used to end this loop for every owner after it.
+    await Promise.all(
+      matches.map((m) => notifyUser(m.ownerId, "notification-created", { type: "CATEGORY_MATCH" })),
+    )
+  })().catch((e) => {
+    // Matching is best-effort: a listing must not fail because nobody was told
+    // about it. But it is LOGGED — until 2 Oct 2026 this catch was silent, and
+    // a matcher that throws looked exactly like one that found nobody.
+    console.error(`[category-match] notify failed for item ${input.itemId}`, e)
+  })
+}

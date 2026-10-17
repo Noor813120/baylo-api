@@ -1,10 +1,12 @@
 import { auth } from "@/../auth"
 import { redirect } from "next/navigation"
 import prisma from "@/lib/prisma"
+import { asTrades, asOffer, OFFERED_ITEM_REF, IN_TRADE_PHASE } from "@/lib/trade-row"
 import { CO2_PER_CATEGORY, computeImpactData } from "@/lib/impact-constants"
 import { isLeavesOnlyTrade } from "@/lib/trade-format"
 import TradesClient from "./TradesClient"
 import { describeMessage } from "@/lib/chat-helpers"
+import { ITEM_IMAGES, toImageUrls, type ImagesLike } from "@/lib/item-images"
 
 const CATEGORY_HASHTAG: Record<string, string> = {
   ELECTRONICS: "#Electronics",
@@ -15,20 +17,14 @@ const CATEGORY_HASHTAG: Record<string, string> = {
   TOYS:        "#KidsToys",
   TOOLS:       "#ToolsDIY",
   FOOD:        "#Food",
-  SERVICES:    "#Services",
   OTHER:       "#Miscellaneous",
 }
 
 export const dynamic = "force-dynamic"
 export const revalidate = 0
 
-function firstImage(raw: string): string | null {
-  try {
-    const imgs = JSON.parse(raw)
-    return Array.isArray(imgs) && imgs[0] ? (imgs[0] as string) : null
-  } catch {
-    return null
-  }
+function firstImage(raw: ImagesLike): string | null {
+  return toImageUrls(raw)[0] ?? null
 }
 
 function timeAgo(date: Date): string {
@@ -62,35 +58,37 @@ export default async function TradesPage() {
       where: { id: myId },
       select: { name: true, avatar: true, leaves: true },
     }),
-    prisma.tradeRequest.findMany({
+    prisma.trade.findMany({
       where: {
+        ...IN_TRADE_PHASE,
         OR: [
-          { senderId: myId,   hiddenBySender:   false },
-          { receiverId: myId, hiddenByReceiver: false },
+          { senderId: myId },
+          { receiverId: myId },
         ],
       },
       select: {
-        id: true, status: true, createdAt: true, updatedAt: true,
-        hiddenBySender: true, hiddenByReceiver: true,
+        // tradeCreatedAt: when the deal became a trade, shown as createdAt below.
+        id: true, status: true, tradeCreatedAt: true, updatedAt: true, offeredLeaves: true,
         senderId: true, receiverId: true,
         offeredItemId: true, requestedItemId: true,
-        offeredItem:   { select: { id: true, title: true, images: true, category: true, status: true, valueLeaves: true } },
-        requestedItem: { select: { id: true, title: true, images: true, category: true, status: true, valueLeaves: true } },
+        offeredItem:   { select: { id: true, title: true, images: ITEM_IMAGES, category: true, status: true, valueLeaves: true } },
+        requestedItem: { select: { id: true, title: true, images: ITEM_IMAGES, category: true, status: true, valueLeaves: true } },
         sender:        { select: { id: true, name: true, avatar: true } },
         receiver:      { select: { id: true, name: true, avatar: true } },
         reviews:       { where: { reviewerId: myId }, select: { id: true, rating: true } },
       },
       orderBy: { updatedAt: "desc" },
-    }),
+    }).then(asTrades),
     // Incoming offers: offers where the current user is the listing owner (receiver)
-    prisma.offer.findMany({
-      where: { receiverId: myId, status: "PENDING" },
+    prisma.trade.findMany({
+      where: { receiverId: myId, offerStatus: "PENDING" },
       include: {
-        post:   { select: { id: true, title: true, images: true, valueLeaves: true } },
+        requestedItem: { select: { id: true, title: true, images: ITEM_IMAGES, valueLeaves: true } },
+        offeredItem: OFFERED_ITEM_REF,
         sender: { select: { id: true, name: true, avatar: true, rating: true, totalTrades: true } },
       },
       orderBy: { createdAt: "desc" },
-    }),
+    }).then((rows) => rows.map(asOffer)),
     prisma.message.findMany({
       where: { receiverId: myId },
       include: { sender: { select: { name: true } } },
@@ -107,7 +105,7 @@ export default async function TradesPage() {
       where: { followeeId: myId, status: "PENDING" },
     }),
     // Weekly completed trade count for the sidebar goal widget
-    prisma.tradeRequest.count({
+    prisma.trade.count({
       where: {
         OR: [{ senderId: myId }, { receiverId: myId }],
         status: "COMPLETED",
@@ -115,7 +113,7 @@ export default async function TradesPage() {
       },
     }),
     // Weekly completed trades with categories — for CO₂ calc
-    prisma.tradeRequest.findMany({
+    prisma.trade.findMany({
       where: {
         OR: [{ senderId: myId }, { receiverId: myId }],
         status: "COMPLETED",
@@ -126,7 +124,7 @@ export default async function TradesPage() {
         offeredItem:   { select: { category: true } },
         requestedItem: { select: { category: true } },
       },
-    }),
+    }).then(asTrades),
     // Trending: most-used categories in the last 7 days
     prisma.item.groupBy({
       by: ["category"],
@@ -154,34 +152,20 @@ export default async function TradesPage() {
     allOfferedItemIds.size > 0
       ? await prisma.item.findMany({
           where: { id: { in: [...allOfferedItemIds] } },
-          select: { id: true, title: true, images: true, valueLeaves: true },
+          select: { id: true, title: true, images: ITEM_IMAGES, valueLeaves: true },
         })
       : []
 
   const itemMap = new Map(offeredItemDetails.map((i) => [i.id, i]))
 
-  // ── Leaves-only: look up offeredLeaves from the accepted Offer ───────────
+  // ── Leaves-only: offeredLeaves ───────────────────────────────────────────
   // For Leaves-only trades, offeredItemId === requestedItemId (placeholder).
-  // We recover the Leaves amount by matching the accepted Offer by (senderId, postId).
-  const leavesOnlyTrades = trades.filter((t) => isLeavesOnlyTrade(t.offeredItemId, t.requestedItemId))
+  // The amount is on the deal's own row since schema v2; it used to be
+  // recovered from the accepted Offer by (senderId, postId), which was not unique.
   const offeredLeavesMap = new Map<string, number>() // tradeId → Leaves
-
-  if (leavesOnlyTrades.length > 0) {
-    const offerRecords = await prisma.offer.findMany({
-      where: {
-        OR: leavesOnlyTrades.map((t) => ({
-          senderId: t.senderId,
-          postId:   t.requestedItemId,
-          status:   "ACCEPTED",
-        })),
-        offeredLeaves: { gt: 0 },
-      },
-      select: { senderId: true, postId: true, offeredLeaves: true },
-    })
-    const offerMap = new Map(offerRecords.map((o) => [`${o.senderId}:${o.postId}`, o.offeredLeaves ?? 0]))
-    for (const t of leavesOnlyTrades) {
-      const lv = offerMap.get(`${t.senderId}:${t.requestedItemId}`)
-      if (lv) offeredLeavesMap.set(t.id, lv)
+  for (const t of trades) {
+    if (isLeavesOnlyTrade(t.offeredItemId, t.requestedItemId) && (t.offeredLeaves ?? 0) > 0) {
+      offeredLeavesMap.set(t.id, t.offeredLeaves as number)
     }
   }
 
@@ -201,7 +185,7 @@ export default async function TradesPage() {
     return {
       id:            t.id,
       status:        t.status as string,
-      createdAt:     t.createdAt.toISOString(),
+      createdAt:     (t.tradeCreatedAt ?? t.updatedAt).toISOString(),
       updatedAt:     t.updatedAt.toISOString(),
       offeredItem:   {
         id:             t.offeredItem.id,

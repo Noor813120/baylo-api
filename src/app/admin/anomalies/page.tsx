@@ -1,11 +1,12 @@
 import prisma from "@/lib/prisma"
 import { NEW_PARTNER_WINDOW_DAYS } from "@/lib/task-constants"
-import { suspensionState } from "@/lib/moderation"
+import { suspensionState, activeSuspension } from "@/lib/moderation"
 import { bracketOf } from "@/lib/brackets"
 import { valueCap } from "@/lib/trade-rules"
 import { AdminListingImage } from "@/components/AdminListingImage"
 import { ValueReviewActions } from "../listings/ValueReviewActions"
 import { StaggerGroup, StaggerItem } from "@/components/admin/Stagger"
+import { ITEM_IMAGES, toImageUrls, type ImagesLike } from "@/lib/item-images"
 
 export const dynamic = "force-dynamic"
 export const revalidate = 0
@@ -52,16 +53,8 @@ const card: React.CSSProperties = {
 const th: React.CSSProperties = { padding: "10px 12px", textAlign: "left", color: "#888", fontSize: 12 }
 const td: React.CSSProperties = { padding: "10px 12px", fontSize: 13 }
 
-function parseFirstImage(raw: string | null | undefined): string | null {
-  if (!raw) return null
-  try {
-    const parsed: unknown = JSON.parse(raw)
-    if (!Array.isArray(parsed)) return null
-    const first = parsed.find((value): value is string => typeof value === "string" && value.trim().length > 0)
-    return first ?? null
-  } catch {
-    return null
-  }
+function parseFirstImage(raw: ImagesLike): string | null {
+  return toImageUrls(raw)[0] ?? null
 }
 
 export default async function ReviewQueuePage() {
@@ -71,9 +64,9 @@ export default async function ReviewQueuePage() {
     prisma.item.findMany({
       where: { status: "PENDING_REVIEW" },
       select: {
-        id: true, title: true, category: true, condition: true, images: true,
+        id: true, title: true, category: true, condition: true, images: ITEM_IMAGES,
         valueLeaves: true, suggestedLeaves: true, valuationSource: true, updatedAt: true,
-        user: { select: { id: true, name: true, email: true, suspendedAt: true, suspendedUntil: true } },
+        user: { select: { id: true, name: true, email: true, suspensions: activeSuspension() } },
       },
       orderBy: [{ updatedAt: "asc" }, { id: "asc" }],
       take: 100,
@@ -88,10 +81,10 @@ export default async function ReviewQueuePage() {
         CASE WHEN tr."senderId" = tc."userId" THEN tr."receiverId" ELSE tr."senderId" END AS "partnerId",
         COUNT(*)            AS "zeroSwaps",
         MAX(tc."createdAt") AS "lastAt"
-      FROM "TaskCompletion" tc
-      JOIN "TradeRequest" tr ON tr."id" = tc."refId"
+      FROM "LeafTransaction" tc
+      JOIN "Trade" tr ON tr."id" = tc."taskRefId"
       WHERE tc."task" IN ('SAFEZONE_MEETUP', 'VERIFIED_SWAP')
-        AND tc."leaves" = 0
+        AND tc."amount" = 0
       GROUP BY tc."userId", "partnerId"
       HAVING COUNT(*) >= ${MIN_REPEATS}
       ORDER BY "zeroSwaps" DESC, "lastAt" DESC

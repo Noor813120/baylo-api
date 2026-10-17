@@ -17,7 +17,7 @@
 // TRADE_REWARD — 2 x the bracket of the item you gave, see @/lib/trade-rules —
 // and the two could not coexist: a bracket-1 bridge costs 10 Leaves, so a flat
 // 20 on top of the reward would have paid 22 for the trade the fee was meant
-// to price. The rows it wrote stay in TaskCompletion (the enum value survives
+// to price. The rows it wrote stay in the ledger (the enum value survives
 // in the schema for them); nothing awards it, and the backfill no longer lists
 // it as eligible. What it became is FIRST_TRADE: the same 20, ONCE, for the
 // first trade this account ever completes — a milestone rather than a faucet.
@@ -94,6 +94,21 @@ export const SIGNUP_GRANT_LEAVES = 20
 // one-time VERIFY_ACCOUNT reward, which markVerified() pays together. Every
 // piece of user-facing copy that promises a number for verifying reads this.
 export const VERIFY_CREDIT_LEAVES = SIGNUP_GRANT_LEAVES + TASK_REWARDS.VERIFY_ACCOUNT
+
+// The verified-MSME welcome grant (24 Sep 2026), credited to the ORGANISATION'S
+// own balance (its backing User row) when an admin approves its business
+// document. Paid by POST /api/admin/organizations/[id].
+//
+// Pegged to VERIFY_CREDIT_LEAVES on purpose: a verified shop is welcomed with
+// exactly what a verified person sees land (30 today), not a bigger number that
+// would make registering a business a better faucet than signing up. It is gated
+// the same way, behind a check a human did, and never at registration: an org's
+// backing row is created with signupGrantClaimed = true so the person-side grant
+// can never reach it.
+//
+// Written as ONE SIGNUP_GRANT ledger row, so it is cap-exempt and already
+// counted as issuance by scripts/lib/ledger-invariant.ts.
+export const ORG_WELCOME_LEAVES = VERIFY_CREDIT_LEAVES
 
 // ── Recognition ranks ────────────────────────────────────────────────────────
 // Ranked on lifetimeLeaves, never on the spendable balance — otherwise a user

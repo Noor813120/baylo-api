@@ -1,13 +1,17 @@
 import { NextRequest, NextResponse } from "next/server"
 import { resolveSession } from "@/lib/api-auth"
 import prisma from "@/lib/prisma"
-import pusher from "@/lib/pusher"
+import { notifyUser } from "@/lib/realtime"
 import { ITEM_PUBLIC_SELECT, preciseAccessItemIds, shapeItem } from "@/lib/item-visibility"
 import { parseBody, createTradeSchema, tradeStatusSchema } from "@/lib/validation"
 import { enforceInitiateTrade, enforceAcceptTrade } from "@/lib/reputation-gate"
 import { assessOffer, refusalStatus } from "@/lib/offer-check"
 import { releaseTradeFee, TRADE_FEE_SELECT } from "@/lib/trade-fee-release"
 import { enforceNotBlocked } from "@/lib/blocking"
+import {
+  isShopMemberPair, legacyParticipantRefusal, resolveTradeParticipant, shopMemberSelfTradeRefusal,
+} from "@/lib/trade-participant"
+import { asTradeRequest, IN_TRADE_PHASE } from "@/lib/trade-row"
 
 export async function GET() {
   try {
@@ -18,27 +22,27 @@ export async function GET() {
     // PENDING counterparty received the other party's exact pickup coordinates.
     // The pickup columns are resolved through the same rule as every other read
     // path, so a PENDING trade sees the coarse point and an ACCEPTED one does not.
-    const trades = await prisma.tradeRequest.findMany({
-      where: { OR: [{ senderId: session.user.id }, { receiverId: session.user.id }] },
+    const trades = await prisma.trade.findMany({
+      where: { ...IN_TRADE_PHASE, OR: [{ senderId: session.user.id }, { receiverId: session.user.id }] },
       include: {
         offeredItem: { select: ITEM_PUBLIC_SELECT },
         requestedItem: { select: ITEM_PUBLIC_SELECT },
         sender: { select: { id: true, name: true, avatar: true } },
         receiver: { select: { id: true, name: true, avatar: true } },
       },
-      orderBy: { createdAt: "desc" },
+      orderBy: { tradeCreatedAt: "desc" },
     })
 
     const viewerId = session.user.id
     const access = await preciseAccessItemIds(
       viewerId,
-      trades.flatMap((t) => [t.offeredItemId, t.requestedItemId]),
+      trades.flatMap((t) => [t.offeredItemId as string, t.requestedItemId]),
     )
 
     return NextResponse.json(
       trades.map((t) => ({
-        ...t,
-        offeredItem: shapeItem(t.offeredItem, viewerId, access),
+        ...asTradeRequest(t),
+        offeredItem: shapeItem(t.offeredItem!, viewerId, access),
         requestedItem: shapeItem(t.requestedItem, viewerId, access),
       })),
     )
@@ -95,6 +99,9 @@ export async function POST(req: NextRequest) {
     )
     if (blocked) return blocked
 
+    // A member proposing to their own shop. See @/lib/trade-participant.
+    if (await isShopMemberPair(prisma, session.user.id, requestedItem.userId)) return shopMemberSelfTradeRefusal()
+
     // ── Reputation gates ──
     //
     // INITIATING. Two checks: an unfulfilled deferred agreement blocks starting
@@ -146,7 +153,7 @@ export async function POST(req: NextRequest) {
     const gate = await enforceInitiateTrade(session.user.id, [requestedItemId])
     if (gate.response) return gate.response
 
-    const existing = await prisma.tradeRequest.findFirst({
+    const existing = await prisma.trade.findFirst({
       where: {
         senderId: session.user.id,
         requestedItemId,
@@ -164,13 +171,19 @@ export async function POST(req: NextRequest) {
     })
 
     const { trade, chatMessage } = await prisma.$transaction(async (tx) => {
-      const createdTrade = await tx.tradeRequest.create({
+      // A direct request has no offer phase: `offerStatus` stays NULL and the
+      // deal is a trade from its first moment, so both timestamps are now.
+      const now = new Date()
+      const createdTrade = await tx.trade.create({
         data: {
           senderId: session.user.id,
           receiverId: requestedItem.userId,
           offeredItemId,
           requestedItemId,
           message: message || null,
+          status: "PENDING",
+          createdAt: now,
+          tradeCreatedAt: now,
         },
       })
 
@@ -218,9 +231,9 @@ export async function POST(req: NextRequest) {
       senderName: sender?.name ?? "",
       senderAvatar: sender?.avatar ?? null,
     }
-    pusher.trigger(`private-user-${requestedItem.userId}`, "new-message", pusherPayload).catch(() => {})
+    await notifyUser(requestedItem.userId, "new-message", pusherPayload)
 
-    return NextResponse.json(trade, { status: 201 })
+    return NextResponse.json(asTradeRequest(trade), { status: 201 })
   } catch {
     return NextResponse.json({ error: "Internal server error" }, { status: 500 })
   }
@@ -230,13 +243,12 @@ export async function PATCH(req: NextRequest) {
   try {
     const session = await resolveSession()
     if (!session?.user?.id) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
-    const myId = session.user.id
 
     const parsed = await parseBody(req, tradeStatusSchema)
     if (!parsed.ok) return parsed.response
     const { tradeId, status } = parsed.data
 
-    const trade = await prisma.tradeRequest.findUnique({
+    const found = await prisma.trade.findUnique({
       where: { id: tradeId },
       include: {
         requestedItem: { select: { id: true, title: true, status: true } },
@@ -246,10 +258,25 @@ export async function PATCH(req: NextRequest) {
       },
     })
 
-    if (!trade) return NextResponse.json({ error: "Trade not found" }, { status: 404 })
-    if (trade.receiverId !== myId) return NextResponse.json({ error: "Forbidden" }, { status: 403 })
+    // A deal still in its offer phase is not a trade (and has no offered item
+    // only when it is a legacy Leaves-only offer).
+    if (!found || found.status === null || !found.offeredItemId || !found.offeredItem) {
+      return NextResponse.json({ error: "Trade not found" }, { status: 404 })
+    }
+    const trade = { ...found, offeredItemId: found.offeredItemId, offeredItem: found.offeredItem }
+    // The receiver answers: the person, or -- acting as a shop -- the shop, when
+    // the request was sent to it. `myId` is that side from here on, so the
+    // standing gated and the actor on each notification are the shop's. See
+    // @/lib/trade-participant.
+    const who = await resolveTradeParticipant(session.user.id, req.headers, trade, "receiver")
+    if (!who.ok) return legacyParticipantRefusal(who)
+    const myId = who.participantId
 
     if (status === "ACCEPTED") {
+      // One person on both sides: refused at accept as well as at propose, for
+      // a request that predates the membership. See @/lib/trade-participant.
+      if (await isShopMemberPair(prisma, trade.senderId, trade.receiverId)) return shopMemberSelfTradeRefusal()
+
       // ── Reputation gate, ACCEPT path ──
       //
       // The premium bracket gate and the value ceiling apply -- the receiver is
@@ -276,7 +303,7 @@ export async function PATCH(req: NextRequest) {
         }
 
         // Accept this trade and lock items
-        await tx.tradeRequest.update({ where: { id: tradeId }, data: { status: "ACCEPTED" } })
+        await tx.trade.update({ where: { id: tradeId }, data: { status: "ACCEPTED" } })
         const locked = await tx.item.updateMany({
           where: { id: { in: itemIds }, status: "AVAILABLE" },
           data: { status: "IN_TRADE" },
@@ -284,7 +311,7 @@ export async function PATCH(req: NextRequest) {
         if (locked.count !== itemIds.length) throw new Error("item_unavailable")
 
         // Find all other PENDING trades that involve either of these items
-        const rivals = await tx.tradeRequest.findMany({
+        const rivals = await tx.trade.findMany({
           where: {
             id: { not: tradeId },
             status: "PENDING",
@@ -297,7 +324,7 @@ export async function PATCH(req: NextRequest) {
         })
 
         if (rivals.length > 0) {
-          await tx.tradeRequest.updateMany({
+          await tx.trade.updateMany({
             where: { id: { in: rivals.map((r) => r.id) } },
             data: { status: "REJECTED" },
           })
@@ -337,7 +364,7 @@ export async function PATCH(req: NextRequest) {
       })
 
       // Pusher: notify accepted sender + each rival's sender in real-time
-      const rivals2 = await prisma.tradeRequest.findMany({
+      const rivals2 = await prisma.trade.findMany({
         where: {
           id: { not: tradeId },
           status: "REJECTED",
@@ -352,36 +379,36 @@ export async function PATCH(req: NextRequest) {
         take: 50,
       })
 
-      const pusherPromises: Promise<unknown>[] = [
-        pusher.trigger(`private-user-${trade.senderId}`, "trade-status-changed", {
+      // Promise.allSettled() alone did not make this safe: a trigger that
+      // throws before returning a promise threw out of the array literal. See
+      // @/lib/realtime.
+      await Promise.all([
+        notifyUser(trade.senderId, "trade-status-changed", {
           tradeId,
           newStatus: "ACCEPTED",
           itemIds: [trade.offeredItemId, trade.requestedItemId],
         }),
-      ]
-      for (const rival of rivals2) {
-        pusherPromises.push(
-          pusher.trigger(`private-user-${rival.senderId}`, "trade-status-changed", {
+        ...rivals2.map((rival) =>
+          notifyUser(rival.senderId, "trade-status-changed", {
             tradeId:   rival.id,
             newStatus: "REJECTED",
             reason:    "item_unavailable",
             itemIds:   [trade.offeredItemId, trade.requestedItemId],
-          })
-        )
-      }
-      await Promise.allSettled(pusherPromises)
+          }),
+        ),
+      ])
 
       return NextResponse.json({ status: "ACCEPTED" })
     }
 
     if (status === "REJECTED") {
       // The status and the refund together; see releaseTradeFee().
-      const rejected = await prisma.tradeRequest.findUnique({
+      const rejected = await prisma.trade.findUnique({
         where: { id: tradeId },
         select: TRADE_FEE_SELECT,
       })
       await prisma.$transaction(async (tx) => {
-        await tx.tradeRequest.update({ where: { id: tradeId }, data: { status: "REJECTED" } })
+        await tx.trade.update({ where: { id: tradeId }, data: { status: "REJECTED" } })
         if (rejected) await releaseTradeFee(tx, rejected, "rejected")
       })
       await prisma.notification.create({
@@ -393,7 +420,8 @@ export async function PATCH(req: NextRequest) {
           actorId: myId,
         },
       })
-      await pusher.trigger(`private-user-${trade.senderId}`, "trade-status-changed", {
+      // The decline is saved: a Pusher failure is logged, never the response.
+      await notifyUser(trade.senderId, "trade-status-changed", {
         tradeId,
         newStatus: "REJECTED",
         itemIds:   [trade.offeredItemId, trade.requestedItemId],

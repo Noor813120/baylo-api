@@ -1,23 +1,20 @@
 import { NextRequest, NextResponse } from "next/server"
 import { resolveSession } from "@/lib/api-auth"
 import prisma from "@/lib/prisma"
-import pusher from "@/lib/pusher"
+import { notifyUser } from "@/lib/realtime"
 import { createOfferSchema, parseBody } from "@/lib/validation"
 import { enforceInitiateTrade } from "@/lib/reputation-gate"
+import { ITEM_IMAGES, toImageUrls, type ImagesLike } from "@/lib/item-images"
 
-function firstImage(raw: string | null | undefined): string | null {
-  if (!raw) return null
-  try {
-    const parsed: unknown = JSON.parse(raw)
-    return Array.isArray(parsed) && typeof parsed[0] === "string" ? parsed[0] : null
-  } catch {
-    return null
-  }
+function firstImage(raw: ImagesLike): string | null {
+  return toImageUrls(raw)[0] ?? null
 }
 import { enforceNotBlocked } from "@/lib/blocking"
 import { assessOffer, refusalStatus } from "@/lib/offer-check"
 import { holdBridgeFee } from "@/lib/bridge-fee"
 import { TRADING_POLICY_VERSION } from "@/lib/trade-rules"
+import { settleQuestsAsync } from "@/lib/quests"
+import { isShopMemberPair, shopMemberSelfTradeRefusal } from "@/lib/trade-participant"
 
 /**
  * POST /api/offers — one of your items for one of theirs.
@@ -93,7 +90,7 @@ export async function POST(req: NextRequest) {
 
     const post = await prisma.item.findUniqueOrThrow({
       where: { id: postId },
-      select: { id: true, title: true, images: true, userId: true, user: { select: { id: true, name: true } } },
+      select: { id: true, title: true, images: ITEM_IMAGES, userId: true, user: { select: { id: true, name: true } } },
     })
 
     // An offer is a trade initiation and creates a chat message as a side
@@ -101,6 +98,10 @@ export async function POST(req: NextRequest) {
     // gates, for the same reason as the trade route.
     const blocked = await enforceNotBlocked(senderId, post.userId, "make an offer to this person")
     if (blocked) return blocked
+
+    // A member offering on their own shop's listing. Refused here AND at
+    // accept: one person on both sides of a trade. See @/lib/trade-participant.
+    if (await isShopMemberPair(prisma, senderId, post.userId)) return shopMemberSelfTradeRefusal()
 
     // ── Reputation gates, INITIATING path ──
     //
@@ -113,8 +114,8 @@ export async function POST(req: NextRequest) {
     // One live offer per listing per sender. Without this a proposer stacks
     // three bridges on one listing and holds three fees against a listing that
     // can only be traded once.
-    const standing = await prisma.offer.findFirst({
-      where: { postId, senderId, status: "PENDING" },
+    const standing = await prisma.trade.findFirst({
+      where: { requestedItemId: postId, senderId, offerStatus: "PENDING" },
       select: { id: true },
     })
     if (standing) {
@@ -124,11 +125,13 @@ export async function POST(req: NextRequest) {
       )
     }
 
-    const duplicateOfferedItem = await prisma.offer.findFirst({
+    // The offered item is a real column since schema v2, so this is an exact
+    // match rather than a substring search through a JSON list.
+    const duplicateOfferedItem = await prisma.trade.findFirst({
       where: {
         senderId,
-        status: "PENDING",
-        offeredItems: { contains: offeredItemId },
+        offerStatus: "PENDING",
+        offeredItemId,
       },
       select: { id: true },
     })
@@ -177,28 +180,27 @@ export async function POST(req: NextRequest) {
     let offer: { id: string }
     try {
       offer = await prisma.$transaction(async (tx) => {
-        const duplicate = await tx.offer.findFirst({
+        const duplicate = await tx.trade.findFirst({
           where: {
             senderId,
-            status: "PENDING",
-            offeredItems: { contains: offeredItemId },
+            offerStatus: "PENDING",
+            offeredItemId,
           },
           select: { id: true },
         })
         if (duplicate) throw new DuplicateOfferedItem()
 
-        const created = await tx.offer.create({
+        // The deal's one row (schema v2), in its offer phase: `status` stays
+        // NULL until the receiver accepts it into a trade.
+        const created = await tx.trade.create({
           data: {
-            postId,
+            requestedItemId: postId,
             senderId,
             receiverId: post.userId,
-            // The shape the chat card and the accept path read. One item now,
-            // still an array on the wire: the column is a JSON blob with years
-            // of rows in it and re-shaping it would be a migration of text.
-            offeredItems: JSON.stringify([{ id: assessed.offered.id, title: assessed.offered.title }]),
+            offeredItemId: assessed.offered.id,
             offeredLeaves: null,
             message: message?.trim() || null,
-            status: "PENDING",
+            offerStatus: "PENDING",
             // The QUOTE, either direction. Set even when the receiver is the
             // one who will pay it -- their accept sheet needs the number, and
             // the accept path re-derives and re-checks it anyway. It is not a
@@ -217,7 +219,7 @@ export async function POST(req: NextRequest) {
         if (proposerFee > 0) {
           const held = await holdBridgeFee(tx, {
             userId: senderId,
-            offerId: created.id,
+            tradeId: created.id,
             amount: proposerFee,
             at: now,
           })
@@ -249,6 +251,11 @@ export async function POST(req: NextRequest) {
       throw e
     }
 
+    // Daily quests, now that the offer has committed: the sender's "send an
+    // offer" pair and the receiver's "get an offer". Fire-and-forget.
+    settleQuestsAsync(senderId, ["SEND_OFFER", "SEND_BRIDGE_OFFER"])
+    settleQuestsAsync(post.userId, ["RECEIVE_OFFER"])
+
     const sender = await prisma.user.findUnique({
       where: { id: senderId },
       select: { name: true, avatar: true, leaves: true },
@@ -279,17 +286,15 @@ export async function POST(req: NextRequest) {
       data: { senderId, receiverId: post.userId, content: msgContent },
     })
 
-    pusher
-      .trigger(`private-user-${post.userId}`, "new-message", {
-        id: chatMessage.id,
-        content: chatMessage.content,
-        senderId: chatMessage.senderId,
-        receiverId: chatMessage.receiverId,
-        createdAt: chatMessage.createdAt.toISOString(),
-        senderName: sender?.name ?? "",
-        senderAvatar: sender?.avatar ?? null,
-      })
-      .catch(() => {})
+    await notifyUser(post.userId, "new-message", {
+      id: chatMessage.id,
+      content: chatMessage.content,
+      senderId: chatMessage.senderId,
+      receiverId: chatMessage.receiverId,
+      createdAt: chatMessage.createdAt.toISOString(),
+      senderName: sender?.name ?? "",
+      senderAvatar: sender?.avatar ?? null,
+    })
 
     await prisma.notification.deleteMany({
       where: { userId: post.userId, actorId: senderId, type: "NEW_MESSAGE", read: false },

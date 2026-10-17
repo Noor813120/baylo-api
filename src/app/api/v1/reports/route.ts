@@ -5,6 +5,7 @@ import prisma from "@/lib/prisma"
 import { ok, unauthenticated, notFound, forbidden, conflict } from "@/lib/v1/envelope"
 import { parseJsonBody } from "@/lib/v1/body"
 import { enforceRateLimit } from "@/lib/rate-limit-config"
+import { REPORT, asReport } from "@/lib/report-case"
 import {
   REPORT_CATEGORIES,
   REPORT_TARGET_TYPES,
@@ -79,6 +80,20 @@ async function resolveTargetOwner(
     return user && !user.deletedAt ? { ownerId: user.id, label: user.name } : null
   }
 
+  // STORY. Like a listing: the story exists, whoever can see it. Expired and
+  // deleted stories stay reportable -- the viewer may have watched it a minute
+  // before it ran out, and the row is kept for exactly this. The label is the
+  // caption, or the shared listing's title when there is none.
+  if (targetType === "story") {
+    const story = await prisma.story.findUnique({
+      where: { id: targetId },
+      select: { userId: true, caption: true, item: { select: { title: true } } },
+    })
+    return story
+      ? { ownerId: story.userId, label: story.caption ?? story.item?.title ?? "Story" }
+      : null
+  }
+
   // MESSAGE. Participation is required — see the oracle note above. A message
   // the reporter neither sent nor received is reported as "not found", the same
   // answer a nonexistent id gets, so the two are indistinguishable from outside.
@@ -125,9 +140,10 @@ export async function POST(req: NextRequest) {
   // unique index on (reporterId, targetType, targetId, openKey) is the other
   // half and the authoritative one; this check exists to return a useful 409
   // with the existing report's id instead of a driver constraint error.
-  const existing = await prisma.report.findFirst({
+  const existing = await prisma.moderationCase.findFirst({
     where: {
-      reporterId,
+      ...REPORT,
+      filedById: reporterId,
       targetType: dbTarget,
       targetId,
       status: { in: [...LIVE_REPORT_STATUSES] },
@@ -144,9 +160,10 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    const report = await prisma.report.create({
+    const report = await prisma.moderationCase.create({
       data: {
-        reporterId,
+        ...REPORT,
+        filedById: reporterId,
         targetType: dbTarget,
         targetId,
         category: toDbCategory(category),
@@ -202,8 +219,8 @@ export async function GET() {
   const session = await resolveSession()
   if (!session?.user?.id) return unauthenticated()
 
-  const rows = await prisma.report.findMany({
-    where: { reporterId: session.user.id },
+  const rows = await prisma.moderationCase.findMany({
+    where: { ...REPORT, filedById: session.user.id },
     select: {
       id: true,
       targetType: true,
@@ -211,8 +228,8 @@ export async function GET() {
       category: true,
       notes: true,
       status: true,
-      resolutionNote: true,
-      resolvedAt: true,
+      decisionNote: true,
+      decidedAt: true,
       createdAt: true,
     },
     orderBy: [{ createdAt: "desc" }, { id: "desc" }],
@@ -220,7 +237,7 @@ export async function GET() {
   })
 
   return ok({
-    reports: rows.map((r) => ({
+    reports: rows.map(asReport).map((r) => ({
       id: r.id,
       targetType: toWireTarget(r.targetType),
       targetId: r.targetId,

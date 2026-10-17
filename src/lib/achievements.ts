@@ -1,7 +1,7 @@
 import type { Prisma, PrismaClient, AchievementCriterion } from "@/generated/prisma/client"
 import prisma from "@/lib/prisma"
 import { isIdVerified } from "@/lib/id-verification"
-import { isPremium, isVip } from "@/lib/premium"
+import { isPremium, isVip, premiumUntil, vipUntil, SUBSCRIPTION_SELECT } from "@/lib/premium"
 
 /**
  * The achievements engine.
@@ -28,7 +28,7 @@ import { isPremium, isVip } from "@/lib/premium"
  * ── GRANTING IS IDEMPOTENT, AND THE CONSTRAINT IS THE CLAIM ──────────────────
  *
  * The grant inserts with skipDuplicates against @@unique([userId, achievementId])
- * -- the same claim pattern as TaskCompletion in @/lib/tasks and for the same
+ * -- the same claim pattern as the task rows in @/lib/tasks and for the same
  * reason: two concurrent requests must not write the row twice, and on Postgres
  * a caught unique violation would abort the enclosing transaction. skipDuplicates
  * compiles to ON CONFLICT DO NOTHING, which does not error.
@@ -108,28 +108,28 @@ async function readActivity(db: Db, userId: string): Promise<Activity | null> {
         where: { id: userId },
         select: {
           isVerified: true, avatar: true, bio: true, location: true, lifetimeLeaves: true,
-          premiumUntil: true, vipUntil: true,
+          subscriptions: SUBSCRIPTION_SELECT,
         },
       }),
       db.item.count({ where: { userId } }),
-      db.tradeRequest.count({
+      db.trade.count({
         where: { status: "COMPLETED", OR: [{ senderId: userId }, { receiverId: userId }] },
       }),
-      db.tradeRequest.count({
+      db.trade.count({
         where: {
           status: "COMPLETED",
           safeZoneHubId: { not: null },
           OR: [{ senderId: userId }, { receiverId: userId }],
         },
       }),
-      db.tradeRequest.count({
+      db.trade.count({
         where: {
           status: "COMPLETED",
           bridgeFeeLeaves: { gt: 0 },
           OR: [{ senderId: userId }, { receiverId: userId }],
         },
       }),
-      db.report.count({ where: { reporterId: userId } }),
+      db.moderationCase.count({ where: { type: "REPORT", filedById: userId } }),
       isIdVerified(userId, db),
     ])
 
@@ -145,7 +145,7 @@ async function readActivity(db: Db, userId: string): Promise<Activity | null> {
     safeZoneMeetups,
     reportsFiled,
     bridgesCompleted,
-    premiumSubscriber: isPremium(user.premiumUntil) || isVip(user.vipUntil),
+    premiumSubscriber: isPremium(premiumUntil(user.subscriptions)) || isVip(vipUntil(user.subscriptions)),
   }
 }
 
@@ -204,8 +204,9 @@ export async function evaluateAchievements(
         orderBy: [{ sortOrder: "asc" }, { name: "asc" }],
       }),
       readActivity(db, userId),
-      db.userAchievement.findMany({
-        where: { userId },
+      // ACHIEVEMENT rows of UserProgress (schema v2).
+      db.userProgress.findMany({
+        where: { userId, type: "ACHIEVEMENT" as const },
         select: { achievementId: true, unlockedAt: true, displayOrder: true, homeDisplayOrder: true },
       }),
     ])
@@ -235,8 +236,11 @@ export async function evaluateAchievements(
       .sort((a, b) => a.key.localeCompare(b.key))
 
     if (toGrant.length > 0) {
-      await db.userAchievement.createMany({
-        data: toGrant.map((def) => ({ userId, achievementId: def.id })),
+      // unlockedAt is written explicitly: UserProgress has no default for it
+      // (it is NULL on quest rows), and the ACHIEVEMENT shape check requires it.
+      const unlockedAt = new Date()
+      await db.userProgress.createMany({
+        data: toGrant.map((def) => ({ type: "ACHIEVEMENT" as const, userId, achievementId: def.id, unlockedAt })),
         skipDuplicates: true,
       })
       // Reflect the grants in the returned view without a second query. The
@@ -317,8 +321,8 @@ export async function backfillAchievement(
       if (!activity) continue
       if (progressFor(def.criterion, activity) < def.threshold) continue
 
-      const { count } = await db.userAchievement.createMany({
-        data: [{ userId: user.id, achievementId: def.id }],
+      const { count } = await db.userProgress.createMany({
+        data: [{ type: "ACHIEVEMENT" as const, userId: user.id, achievementId: def.id, unlockedAt: new Date() }],
         skipDuplicates: true,
       })
       granted += count

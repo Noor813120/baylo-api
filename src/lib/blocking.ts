@@ -82,7 +82,7 @@ export function visibleItemWhere(viewerId: string): Prisma.ItemWhereInput {
         // to reply -- and would let a suspension be waited out by an account
         // that kept collecting trade requests the whole time.
         //
-        // notSuspendedWhere() and not `suspendedAt: null`: see the note on that
+        // notSuspendedWhere() and not a hand-rolled filter: see the note on that
         // function for why the shorthand turns every timed suspension permanent.
         ...notSuspendedWhere(),
       },
@@ -201,8 +201,8 @@ export async function enforceNotBlocked(
  * matters, with the actual trade in front of the user.
  */
 export async function blockConsequences(viewerId: string, otherId: string) {
-  const [trades, contracts] = await Promise.all([
-    prisma.tradeRequest.findMany({
+  const [trades] = await Promise.all([
+    prisma.trade.findMany({
       where: {
         status: { in: ["PENDING", "ACCEPTED", "CONFIRMING"] },
         OR: [
@@ -217,23 +217,6 @@ export async function blockConsequences(viewerId: string, otherId: string) {
         offeredItem: { select: { title: true } },
       },
     }),
-    prisma.deferredContract.findMany({
-      where: {
-        status: { in: ["PENDING_ACCEPT", "ACTIVE", "DEFAULTED"] },
-        OR: [
-          { debtorId: viewerId, creditorId: otherId },
-          { debtorId: otherId, creditorId: viewerId },
-        ],
-      },
-      select: {
-        id: true,
-        status: true,
-        amountLeaves: true,
-        amountPaidLeaves: true,
-        deadline: true,
-        debtorId: true,
-      },
-    }),
   ])
 
   return {
@@ -241,15 +224,11 @@ export async function blockConsequences(viewerId: string, otherId: string) {
       id: t.id,
       status: t.status,
       // Named so the warning can be specific: "your trade for X is unaffected".
-      offeredItem: t.offeredItem.title,
+      offeredItem: t.offeredItem!.title,
       requestedItem: t.requestedItem.title,
     })),
-    openContracts: contracts.map((c) => ({
-      id: c.id,
-      status: c.status,
-      outstanding: c.amountLeaves - c.amountPaidLeaves,
-      deadline: c.deadline,
-      youOwe: c.debtorId === viewerId,
-    })),
+    // Deferred Points Agreements were retired 16 Sep 2026 and their table was
+    // dropped in schema v2. Always empty; kept on the wire for shipped clients.
+    openContracts: [] as { id: string; status: string; outstanding: number; deadline: Date; youOwe: boolean }[],
   }
 }

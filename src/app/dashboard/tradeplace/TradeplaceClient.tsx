@@ -77,7 +77,6 @@ const CATEGORIES = [
   { value: "PETS",         label: "Pets" },
   { value: "PLANTS",       label: "Plants" },
   { value: "FOOD",         label: "Food" },
-  { value: "SERVICES",     label: "Services" },
   { value: "OTHER",        label: "Other" },
 ];
 
@@ -109,7 +108,6 @@ const CAT_PH_LIGHT: Record<string, string> = {
   PETS:         "linear-gradient(140deg, #e8ffe5 0%, #b5ffa0 100%)",
   PLANTS:       "linear-gradient(140deg, #e5ffe8 0%, #a8ffb0 100%)",
   FOOD:         "linear-gradient(140deg, #e5fff0 0%, #b5ffcc 100%)",
-  SERVICES:     "linear-gradient(140deg, #f3e5ff 0%, #d9b5ff 100%)",
   OTHER:        "linear-gradient(140deg, #f0f0f8 0%, #d8d8ee 100%)",
 };
 
@@ -132,7 +130,6 @@ const CAT_BG: Record<string, string> = {
   PETS:         "linear-gradient(140deg, #0a2e0a 0%, #041804 100%)",
   PLANTS:       "linear-gradient(140deg, #082e0e 0%, #041806 100%)",
   FOOD:         "linear-gradient(140deg, #003e24 0%, #001e12 100%)",
-  SERVICES:     "linear-gradient(140deg, #280442 0%, #14022a 100%)",
   OTHER:        "linear-gradient(140deg, #1c1c28 0%, #0e0e18 100%)",
 };
 

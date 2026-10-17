@@ -2,10 +2,10 @@ import { NextRequest } from "next/server"
 import { z } from "zod"
 import { resolveSession } from "@/lib/api-auth"
 import prisma from "@/lib/prisma"
-import pusher from "@/lib/pusher"
+import { notifyUser } from "@/lib/realtime"
 import { releaseBridgeFee } from "@/lib/bridge-fee"
 import { leafBalances } from "@/lib/leaves"
-import { expireStaleOffers } from "@/lib/offers"
+import { dealByAnyId, expireStaleOffers } from "@/lib/offers"
 import { ok, unauthenticated, notFound, conflict } from "@/lib/v1/envelope"
 import { parseJsonBody } from "@/lib/v1/body"
 
@@ -70,21 +70,24 @@ export async function POST(
   // should not have been withdrawable — and the Leaves come back either way.
   await expireStaleOffers(prisma)
 
-  const offer = await prisma.offer.findUnique({
-    where: { id },
+  // By id or pre-v2 offer id: see dealByAnyId().
+  const found = await prisma.trade.findFirst({
+    where: dealByAnyId(id),
     select: {
       id: true,
-      status: true,
+      offerStatus: true,
       senderId: true,
       receiverId: true,
       offeredLeaves: true,
       bridgeFeeLeaves: true,
       offeredBracket: true,
       targetBracket: true,
-      post: { select: { title: true } },
+      requestedItem: { select: { title: true } },
     },
   })
-  if (!offer) return notFound("Offer not found")
+  // A deal with no offer phase (a legacy direct trade request) is not an offer.
+  if (!found || found.offerStatus === null) return notFound("Offer not found")
+  const offer = { ...found, status: found.offerStatus }
 
   // ONLY THE SENDER. A receiver "withdrawing" someone else's offer is a decline,
   // and it has its own route — 404 rather than 403, the same disclosure rule the
@@ -125,15 +128,15 @@ export async function POST(
     offer.offeredBracket < offer.targetBracket
   const fee = proposerPaid ? offer.bridgeFeeLeaves ?? 0 : 0
   const withdrew = await prisma.$transaction(async (tx) => {
-    const moved = await tx.offer.updateMany({
-      where: { id: offer.id, status: "PENDING" },
-      data: { status: "WITHDRAWN" },
+    const moved = await tx.trade.updateMany({
+      where: { id: offer.id, offerStatus: "PENDING" },
+      data: { offerStatus: "WITHDRAWN" },
     })
     if (moved.count !== 1) return false
     if (fee > 0) {
       await releaseBridgeFee(tx, {
         userId: offer.senderId,
-        offerId: offer.id,
+        tradeId: offer.id,
         amount: fee,
         reason: "withdrawn",
       })
@@ -151,12 +154,13 @@ export async function POST(
   // The receiver's open offer card has to stop being actionable. Best-effort, in
   // the same shape the accept/decline path uses — a dropped realtime event means
   // a stale card until the next fetch, never a wrong database state.
-  pusher
-    .trigger(`private-user-${offer.receiverId}`, "offer-updated", {
-      offerId: offer.id,
-      status: "WITHDRAWN",
-    })
-    .catch(() => {})
+  // This handler has no try: a trigger that threw before returning a promise
+  // (which `.catch()` never saw) reached Next as a bare 500 after the withdraw
+  // was saved. notifyUser() cannot throw. See @/lib/realtime.
+  await notifyUser(offer.receiverId, "offer-updated", {
+    offerId: offer.id,
+    status: "WITHDRAWN",
+  })
 
   return ok(
     {

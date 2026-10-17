@@ -1,14 +1,18 @@
 import { NextRequest, NextResponse } from "next/server"
 import { resolveSession } from "@/lib/api-auth"
 import prisma from "@/lib/prisma"
-import pusher from "@/lib/pusher"
-import { expireStaleOffers, parseOfferedItemIds } from "@/lib/offers"
+import { notifyUser } from "@/lib/realtime"
+import { dealByAnyId, expireStaleOffers } from "@/lib/offers"
 import { offerActionSchema, parseBody } from "@/lib/validation"
 import { enforceAcceptTrade } from "@/lib/reputation-gate"
 import { assessOffer, refusalStatus } from "@/lib/offer-check"
 import { holdBridgeFee, releaseBridgeFee } from "@/lib/bridge-fee"
 import { TRADING_POLICY_VERSION } from "@/lib/trade-rules"
 import { createSystemMessage } from "@/lib/system-message"
+import {
+  isShopMemberPair, legacyParticipantRefusal, resolveTradeParticipant, shopMemberSelfTradeRefusal,
+} from "@/lib/trade-participant"
+import { ITEM_IMAGES, toImageUrls, type ImagesLike } from "@/lib/item-images"
 
 /**
  * PATCH /api/offers/[id] — the RECEIVER accepts or declines.
@@ -63,7 +67,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     const session = await resolveSession()
     if (!session?.user?.id) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
 
-    const { id: offerId } = await params
+    const { id: requestedId } = await params
 
     // Sweep before reading the row, so an offer that aged out is seen as
     // EXPIRED rather than accepted three days late — and its fee is already
@@ -74,28 +78,36 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     if (!parsed.ok) return parsed.response
     const { action, consent } = parsed.data
 
-    const offer = await prisma.offer.findUnique({
-      where: { id: offerId },
+    const offer = await prisma.trade.findFirst({
+      where: dealByAnyId(requestedId),
       include: {
-        post: { select: { id: true, title: true, images: true, valueLeaves: true } },
+        requestedItem: { select: { id: true, title: true, images: ITEM_IMAGES, valueLeaves: true } },
         sender: { select: { id: true, name: true } },
         receiver: { select: { id: true, name: true } },
       },
     })
-    if (!offer) return NextResponse.json({ error: "Offer not found" }, { status: 404 })
-    if (offer.receiverId !== session.user.id) {
-      return NextResponse.json({ error: "Forbidden" }, { status: 403 })
-    }
-    if (offer.status !== "PENDING") {
+    if (!offer || offer.offerStatus === null) return NextResponse.json({ error: "Offer not found" }, { status: 404 })
+    // The row's own id from here on: the URL may carry a pre-v2 offer id.
+    const offerId = offer.id
+    // The receiver decides: the person, or -- acting as a shop (X-Baylo-Org,
+    // ACTIVE membership) -- the shop, for an offer on the shop's listing. From
+    // here on `myId` is that side: the standing the gates read, the actor on
+    // the notification, the author of the system message. Any active member
+    // may decide, and on an up-bridge their consent is given on the SHOP's
+    // behalf and the fee is held off the shop's balance (offer.receiverId).
+    // See @/lib/trade-participant.
+    const who = await resolveTradeParticipant(session.user.id, req.headers, offer, "receiver")
+    if (!who.ok) return legacyParticipantRefusal(who)
+    const myId = who.participantId
+    if (offer.offerStatus !== "PENDING") {
       return NextResponse.json({ error: "Offer already resolved" }, { status: 400 })
     }
     if (offer.senderId === offer.receiverId) {
       return NextResponse.json({ error: "Cannot trade with yourself" }, { status: 400 })
     }
 
-    // The item the sender put up. A legacy row may name several; the first is
-    // the one every shipped client ever sent and the one the card drew.
-    const offeredItemId = parseOfferedItemIds(offer.offeredItems)[0] ?? null
+    // The item the sender put up. NULL only on a legacy Leaves-only offer.
+    const offeredItemId = offer.offeredItemId
     const fee = offer.bridgeFeeLeaves ?? 0
     /**
      * Who owes it, from the brackets stored on the offer. Re-derived from the
@@ -108,6 +120,12 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       offer.offeredBracket < offer.targetBracket
 
     if (action === "accept") {
+      // A shop accepting an offer from one of its own members: one person on
+      // both sides. Refused here as well as at propose, because the offer may
+      // predate the membership. A DECLINE is allowed -- it is how the offer
+      // gets closed and a held fee returned. See @/lib/trade-participant.
+      if (await isShopMemberPair(prisma, offer.senderId, offer.receiverId)) return shopMemberSelfTradeRefusal()
+
       if (!offeredItemId) {
         return NextResponse.json(
           {
@@ -123,7 +141,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       const assessed = await assessOffer(prisma, {
         proposerId: offer.senderId,
         offeredItemId,
-        targetItemId: offer.postId,
+        targetItemId: offer.requestedItemId,
       })
       if (!assessed.ok) {
         return NextResponse.json(
@@ -154,7 +172,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       //
       // The accepter is acquiring the offered item, so the premium bracket gate
       // and the tier value ceiling apply to it.
-      const gate = await enforceAcceptTrade(session.user.id, [offeredItemId])
+      const gate = await enforceAcceptTrade(myId, [offeredItemId])
       if (gate.response) return gate.response
 
       /*
@@ -170,11 +188,11 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
        * 409 rather than the gate's own 403, because it is not the ACCEPTER who
        * is refused — telling them they need premium would be false.
        */
-      const senderGate = await enforceAcceptTrade(offer.senderId, [offer.postId])
+      const senderGate = await enforceAcceptTrade(offer.senderId, [offer.requestedItemId])
       if (senderGate.response) {
         return NextResponse.json(
           {
-            error: `${offer.sender?.name ?? "The sender"} can no longer take on "${offer.post.title}" — their premium subscription has lapsed. The offer stays where it is.`,
+            error: `${offer.sender?.name ?? "The sender"} can no longer take on "${offer.requestedItem.title}" — their premium subscription has lapsed. The offer stays where it is.`,
             code: "SENDER_GATE_FAILED",
           },
           { status: 409 },
@@ -227,9 +245,9 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     try {
       outcome = await prisma.$transaction(async (tx) => {
       // Conditional on PENDING, so two taps produce one resolution.
-      const moved = await tx.offer.updateMany({
-        where: { id: offerId, status: "PENDING" },
-        data: { status: newStatus },
+      const moved = await tx.trade.updateMany({
+        where: { id: offerId, offerStatus: "PENDING" },
+        data: { offerStatus: newStatus },
       })
       if (moved.count !== 1) return { raced: true as const }
 
@@ -240,7 +258,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
         if (fee > 0 && proposerPays) {
           await releaseBridgeFee(tx, {
             userId: offer.senderId,
-            offerId,
+            tradeId: offerId,
             amount: fee,
             reason: "declined",
           })
@@ -254,7 +272,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       if (fee > 0 && !proposerPays) {
         const held = await holdBridgeFee(tx, {
           userId: offer.receiverId,
-          offerId,
+          tradeId: offerId,
           amount: fee,
           at: now,
         })
@@ -269,15 +287,11 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
          * still reads PENDING after a refused accept.)
          */
         if (!held.ok) throw new ReceiverShort(fee, held.have)
-        await tx.offer.update({
-          where: { id: offerId },
-          data: { consentAt: now, policyVersion: TRADING_POLICY_VERSION },
-        })
       }
 
       const [offeredItem, requestedItem] = await Promise.all([
         tx.item.findUnique({ where: { id: offeredItemId as string }, select: { title: true, status: true } }),
-        tx.item.findUnique({ where: { id: offer.postId }, select: { title: true, status: true } }),
+        tx.item.findUnique({ where: { id: offer.requestedItemId }, select: { title: true, status: true } }),
       ])
 
       if (offeredItem?.status !== "AVAILABLE" || requestedItem?.status !== "AVAILABLE") {
@@ -286,21 +300,24 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
 
       const locked = await tx.item.updateMany({
         where: {
-          id: { in: [offeredItemId as string, offer.postId] },
+          id: { in: [offeredItemId as string, offer.requestedItemId] },
           status: "AVAILABLE",
         },
         data: { status: "IN_TRADE" },
       })
       if (locked.count !== 2) throw new Error("item_unavailable")
 
-      const trade = await tx.tradeRequest.create({
+      // The SAME row enters its trade phase (schema v2). Before v2 this created
+      // a separate TradeRequest and copied the offer's columns onto it; sender,
+      // receiver, both items and the message are already on this row.
+      const trade = await tx.trade.update({
+        where: { id: offerId },
         data: {
-          senderId: offer.senderId,
-          receiverId: offer.receiverId,
-          offeredItemId: offeredItemId as string,
-          requestedItemId: offer.postId,
           status: "ACCEPTED",
-          message: offer.message,
+          tradeCreatedAt: now,
+          // An up-bridge's consent belongs to the receiver, who pays; it is
+          // recorded at this accept, onto this same row.
+          ...(fee > 0 && !proposerPays ? { consentAt: now, policyVersion: TRADING_POLICY_VERSION } : {}),
           // Legacy column, never written from here any more: an offer created
           // after 16 Sep 2026 carries no Leaves. Old ACCEPTED trades keep
           // theirs and settle on it.
@@ -315,13 +332,13 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
         select: { id: true },
       })
 
-      const rivals = await tx.offer.findMany({
+      const rivals = await tx.trade.findMany({
         where: {
           id: { not: offerId },
-          status: "PENDING",
+          offerStatus: "PENDING",
           OR: [
-            { postId: { in: [offeredItemId as string, offer.postId] } },
-            { offeredItems: { contains: offeredItemId as string } },
+            { requestedItemId: { in: [offeredItemId as string, offer.requestedItemId] } },
+            { offeredItemId: offeredItemId as string },
           ],
         },
         select: {
@@ -334,16 +351,16 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       })
 
       if (rivals.length > 0) {
-        await tx.offer.updateMany({
-          where: { id: { in: rivals.map((rival) => rival.id) }, status: "PENDING" },
-          data: { status: "DECLINED" },
+        await tx.trade.updateMany({
+          where: { id: { in: rivals.map((rival) => rival.id) }, offerStatus: "PENDING" },
+          data: { offerStatus: "DECLINED" },
         })
         for (const rival of rivals) {
           const proposerPaid = rival.offeredBracket !== null && rival.targetBracket !== null && rival.offeredBracket < rival.targetBracket
           if (proposerPaid && rival.bridgeFeeLeaves) {
             await releaseBridgeFee(tx, {
               userId: rival.senderId,
-              offerId: rival.id,
+              tradeId: rival.id,
               amount: rival.bridgeFeeLeaves,
               reason: "rejected",
             })
@@ -356,7 +373,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
         trade: {
           id: trade.id,
           offeredItemTitle: offeredItem?.title ?? "Item",
-          requestedItemTitle: requestedItem?.title ?? offer.post.title,
+          requestedItemTitle: requestedItem?.title ?? offer.requestedItem.title,
         },
       }
       })
@@ -384,21 +401,18 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     }
     tradeRecord = outcome.trade
 
-    const offeredItemForCard = tradeRecord
+    // On a decline too: the card names what was offered either way. This used to
+    // run only when a trade was created, so every DECLINED update carried
+    // `offeredItemTitle: "Item"` and no image. Null only on a Leaves-only offer,
+    // which is named by its amount below (such an offer can only be declined:
+    // accepting one is refused with OFFER_LEGACY_SHAPE above).
+    const offeredItemForCard = offeredItemId
       ? await prisma.item.findUnique({
-          where: { id: offeredItemId as string },
-          select: { title: true, images: true },
+          where: { id: offeredItemId },
+          select: { title: true, images: ITEM_IMAGES },
         })
       : null
-    const firstImage = (raw: string | null | undefined) => {
-      if (!raw) return null
-      try {
-        const images = JSON.parse(raw)
-        return Array.isArray(images) && typeof images[0] === "string" ? images[0] : null
-      } catch {
-        return null
-      }
-    }
+    const firstImage = (raw: ImagesLike) => toImageUrls(raw)[0] ?? null
 
     // Notify sender — link uses ?partner= format so NotifPanel opens the chat dock
     await prisma.notification.create({
@@ -408,26 +422,28 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
         read: false,
         message:
           action === "accept"
-            ? `accepted your offer on "${offer.post.title}"`
-            : `declined your offer on "${offer.post.title}"` +
+            ? `accepted your offer on "${offer.requestedItem.title}"`
+            : `declined your offer on "${offer.requestedItem.title}"` +
               (fee > 0 && proposerPays
                 ? ` — your ${fee}-Leaf bridging fee is back in your balance`
                 : ""),
-        link: `/dashboard/messages?partner=${session.user.id}`,
-        actorId: session.user.id,
+        link: `/dashboard/messages?partner=${myId}`,
+        actorId: myId,
         // An ACCEPT has a real trade to point at, so it writes the fine-grained
         // ('trade', <tradeId>) pair. A DECLINE never has one: nothing was
         // created, and the thread is where the conversation continues.
         ...(tradeRecord
           ? { entityType: "trade", entityId: tradeRecord.id }
-          : { entityType: "conversation", entityId: session.user.id }),
+          : { entityType: "conversation", entityId: myId }),
       },
     })
-    pusher
-      .trigger(`private-user-${offer.senderId}`, "notification-created", {
-        type: action === "accept" ? "TRADE_ACCEPTED" : "TRADE_REJECTED",
-      })
-      .catch(() => {})
+    // Sent now, awaited with the last batch below: nothing is ordered after it,
+    // so a hanging Pusher costs one client timeout here, not one per await.
+    // notifyUser() never rejects. (A trigger that threw here used to skip
+    // writing both offer-update cards.) See @/lib/realtime.
+    const bellNotified = notifyUser(offer.senderId, "notification-created", {
+      type: action === "accept" ? "TRADE_ACCEPTED" : "TRADE_REJECTED",
+    })
 
     const actorName = offer.receiver?.name ?? "They"
     const updatePayload = {
@@ -439,16 +455,21 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       accepterId: offer.receiverId,
       proposerName: offer.sender?.name ?? "They",
       accepterName: actorName,
-      offeredItemTitle: offeredItemForCard?.title ?? tradeRecord?.offeredItemTitle ?? "Item",
-      requestedItemTitle: offer.post.title,
+      offeredItemTitle:
+        offeredItemForCard?.title ??
+        tradeRecord?.offeredItemTitle ??
+        ((offer.offeredLeaves ?? 0) > 0
+          ? `${offer.offeredLeaves} ${offer.offeredLeaves === 1 ? "Leaf" : "Leaves"}`
+          : "Item"),
+      requestedItemTitle: offer.requestedItem.title,
       offeredItemImage: firstImage(offeredItemForCard?.images),
-      requestedItemImage: firstImage(offer.post.images),
+      requestedItemImage: firstImage(offer.requestedItem.images),
     }
     const senderSystemContent = JSON.stringify(updatePayload)
     const receiverSystemContent = JSON.stringify(updatePayload)
     const systemMsg = await createSystemMessage({
       eventKey: `offer-update:${offerId}:${newStatus}:${offer.senderId}`,
-      senderId: session.user.id,
+      senderId: myId,
       receiverId: offer.senderId,
       tradeId: tradeRecord?.id,
       content: senderSystemContent,
@@ -459,6 +480,9 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       receiverId: offer.receiverId,
       tradeId: tradeRecord?.id,
       content: receiverSystemContent,
+      // The decider's own copy -- the person or the shop that just tapped.
+      // Written read so the decision does not badge the decider's inbox.
+      read: true,
     })
 
     const senderSystemPayload = {
@@ -476,51 +500,50 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       createdAt: counterpartMsg.createdAt.toISOString(),
     } : null
 
-    pusher
-      .trigger(`private-user-${offer.senderId}`, "offer-updated", {
-        offerId,
-        status: newStatus,
-        actorName,
-        releasedLeaves: action === "decline" && proposerPays ? fee : 0,
-        systemMessage: {
-          id: systemMsg.id,
-          content: systemMsg.content,
-          senderId: systemMsg.senderId,
-          receiverId: systemMsg.receiverId,
-          createdAt: systemMsg.createdAt.toISOString(),
-        },
-        ...(tradeRecord && {
-          tradeId: tradeRecord.id,
-          offeredItemTitle: tradeRecord.offeredItemTitle,
-          requestedItemTitle: tradeRecord.requestedItemTitle,
-          senderName: offer.sender?.name ?? "",
-          receiverName: actorName,
-          receiverId: offer.receiverId,
-        }),
-      })
-      .then(() => Promise.all([
-        pusher.trigger(`private-user-${offer.senderId}`, "new-message", senderSystemPayload),
-        ...(receiverSystemPayload ? [
-          pusher.trigger(`private-user-${offer.receiverId}`, "new-message", receiverSystemPayload),
-        ] : []),
-        ...(receiverSystemPayload ? [
-          pusher.trigger(`private-user-${offer.receiverId}`, "offer-updated", {
-            offerId,
-            status: newStatus,
-            actorName,
-            systemMessage: receiverSystemPayload ?? undefined,
-            ...(tradeRecord && {
-              tradeId: tradeRecord.id,
-              offeredItemTitle: tradeRecord.offeredItemTitle,
-              requestedItemTitle: tradeRecord.requestedItemTitle,
-              senderName: offer.sender?.name ?? "",
-              receiverName: actorName,
-              receiverId: offer.receiverId,
-            }),
+    // offer-updated reaches the sender before the new-message events, as it
+    // always has: the card needs the status before the bubble arrives.
+    await notifyUser(offer.senderId, "offer-updated", {
+      offerId,
+      status: newStatus,
+      actorName,
+      releasedLeaves: action === "decline" && proposerPays ? fee : 0,
+      systemMessage: {
+        id: systemMsg.id,
+        content: systemMsg.content,
+        senderId: systemMsg.senderId,
+        receiverId: systemMsg.receiverId,
+        createdAt: systemMsg.createdAt.toISOString(),
+      },
+      ...(tradeRecord && {
+        tradeId: tradeRecord.id,
+        offeredItemTitle: tradeRecord.offeredItemTitle,
+        requestedItemTitle: tradeRecord.requestedItemTitle,
+        senderName: offer.sender?.name ?? "",
+        receiverName: actorName,
+        receiverId: offer.receiverId,
+      }),
+    })
+    await Promise.all([
+      bellNotified,
+      notifyUser(offer.senderId, "new-message", senderSystemPayload),
+      ...(receiverSystemPayload ? [
+        notifyUser(offer.receiverId, "new-message", receiverSystemPayload),
+        notifyUser(offer.receiverId, "offer-updated", {
+          offerId,
+          status: newStatus,
+          actorName,
+          systemMessage: receiverSystemPayload,
+          ...(tradeRecord && {
+            tradeId: tradeRecord.id,
+            offeredItemTitle: tradeRecord.offeredItemTitle,
+            requestedItemTitle: tradeRecord.requestedItemTitle,
+            senderName: offer.sender?.name ?? "",
+            receiverName: actorName,
+            receiverId: offer.receiverId,
           }),
-        ] : []),
-      ]))
-      .catch(() => {})
+        }),
+      ] : []),
+    ])
 
     return NextResponse.json({
       status: newStatus,

@@ -33,11 +33,20 @@ const MAX_NAME = 100
 const MAX_BIO = 1000
 const MAX_LOCATION = 200
 const MAX_URL = 2048
+/**
+ * How many categories a listing may say it is looking for.
+ *
+ * Six of twenty. A cap rather than a formality: this list is what the
+ * event-triggered matcher reads, and an owner who selects all twenty has
+ * subscribed to a notification for every listing posted on Baylo. Small enough
+ * that "looking for" stays a preference, large enough for a real answer.
+ */
+const MAX_LOOKING_FOR = 6
 
 export const CATEGORY_VALUES = [
   "ELECTRONICS", "CLOTHING", "BAGS", "BEAUTY", "ACCESSORIES", "FURNITURE",
   "BOOKS", "GAMING", "SPORTS", "BIKES", "TOYS", "TOOLS", "MUSIC", "ART",
-  "COLLECTIBLES", "PETS", "PLANTS", "FOOD", "SERVICES", "OTHER",
+  "COLLECTIBLES", "PETS", "PLANTS", "FOOD", "OTHER",
 ] as const
 
 export const CONDITION_VALUES = ["NEW", "LIKE_NEW", "GOOD", "FAIR", "POOR"] as const
@@ -47,7 +56,24 @@ export const CONDITION_VALUES = ["NEW", "LIKE_NEW", "GOOD", "FAIR", "POOR"] as c
  * behind an `as never`, which silences the compiler without checking anything —
  * an invalid value reached the database driver.
  */
-export const categorySchema = z.enum(CATEGORY_VALUES)
+export const categorySchema = z.enum(CATEGORY_VALUES, {
+  error: (issue) => removedCategoryMessage(issue.input) ?? undefined,
+})
+
+/**
+ * Category codes that were withdrawn, with their listings moved to OTHER and
+ * their Category rows deleted on live (SERVICES, 16 Oct 2026, by
+ * scripts/apply-remove-services.ts). Kept by name so an app built before the
+ * removal is told WHY its pick was refused rather than "invalid option": a 400
+ * with a sentence, never a 500 from the foreign key.
+ */
+export const REMOVED_CATEGORY_IDS = ["SERVICES"] as const
+
+export function removedCategoryMessage(input: unknown): string | null {
+  return (REMOVED_CATEGORY_IDS as readonly unknown[]).includes(input)
+    ? "Services is no longer a category. Pick Miscellaneous or another category."
+    : null
+}
 export const conditionSchema = z.enum(CONDITION_VALUES)
 
 /**
@@ -240,24 +266,116 @@ const imageHashesField = z
   .max(10)
   .optional()
 
-export const createItemSchema = z.object({
-  title: text(MAX_TITLE).optional(),
-  wantedItem: text(MAX_TITLE).optional(),
-  description: z.string().trim().max(MAX_DESCRIPTION).nullish(),
-  category: categorySchema,
-  condition: conditionSchema,
-  valueLeaves: leafAmountSchema.nullish(),
-  images: z.array(z.string().trim().max(MAX_URL)).max(10).optional(),
-  wantedItems: optionalText(MAX_WANTED),
-  imageHash: z.string().trim().max(128).nullish(),
-  imageHashes: imageHashesField,
-  ...itemPickupFields,
-  ...itemHubField,
-}).refine((v) => !!(v.title ?? v.wantedItem), {
+/**
+ * The categories the owner will take in return. NOT PERISHABLE-ONLY.
+ *
+ * Bounded at MAX_LOOKING_FOR because it is the matcher's input and an
+ * unbounded list is a subscription to the whole marketplace — every category
+ * selected is every new listing notifying this owner. The cap is what keeps
+ * "looking for" a preference rather than a firehose.
+ *
+ * Omitted and `[]` are the same thing here, unlike `hubIds`: there is no
+ * association to leave alone, and Postgres cannot store a null array anyway.
+ */
+const itemLookingForField = {
+  lookingForCategories: z
+    .array(categorySchema)
+    .max(MAX_LOOKING_FOR, `Pick at most ${MAX_LOOKING_FOR} categories to look for`)
+    .optional(),
+}
+
+/**
+ * The perishable block, validated as a UNIT rather than as four loose fields.
+ *
+ * The refinements below are the difference between a schema that describes the
+ * shape and one that describes the feature. A bare "2" with no unit is not a
+ * quantity; a `tradeWithinHours` on a standard item is a window nothing will
+ * ever close, and the expiry sweep selects on `isPerishable` so that row would
+ * simply never expire while looking like it should. Both are refused here
+ * rather than silently dropped, because a client sending them believes
+ * something that is not true.
+ */
+const itemPerishableFields = {
+  isPerishable: z.boolean().optional(),
+  quantity: z.number().positive().finite().max(1_000_000).nullish(),
+  quantityUnit: z.enum(["KG", "PCS", "LITERS"]).nullish(),
+  tradeWithinHours: z.union([z.literal(6), z.literal(24)]).nullish(),
+}
+
+/**
+ * Shared by create and update — see the note on itemPerishableFields.
+ *
+ * The parameter is typed to the four fields it actually reads rather than to
+ * the whole schema, so it composes onto any object carrying them and TypeScript
+ * still checks that it does. `z.ZodTypeAny` alone erases the shape and turns
+ * every one of these predicates into `any`.
+ */
+interface PerishableShape {
+  isPerishable?: boolean | undefined
+  quantity?: number | null | undefined
+  quantityUnit?: "KG" | "PCS" | "LITERS" | null | undefined
+  tradeWithinHours?: 6 | 24 | null | undefined
+}
+
+function refinePerishable<T extends z.ZodType<PerishableShape>>(schema: T) {
+  return schema
+    .refine((v) => v.quantity == null || v.quantityUnit != null, {
+      message: "Pick a unit for that quantity",
+      path: ["quantityUnit"],
+    })
+    .refine((v) => v.quantityUnit == null || v.quantity != null, {
+      message: "Enter a quantity for that unit",
+      path: ["quantity"],
+    })
+    .refine(
+      (v) =>
+        v.isPerishable === true ||
+        (v.tradeWithinHours == null && v.quantity == null && v.quantityUnit == null),
+      {
+        message: "Quantity and trade-within only apply to a perishable listing",
+        path: ["isPerishable"],
+      },
+    )
+    .refine((v) => v.isPerishable !== true || v.tradeWithinHours != null, {
+      message: "Choose how long you can trade this within",
+      path: ["tradeWithinHours"],
+    })
+}
+
+export const createItemSchema = refinePerishable(
+  z.object({
+    title: text(MAX_TITLE).optional(),
+    wantedItem: text(MAX_TITLE).optional(),
+    description: z.string().trim().max(MAX_DESCRIPTION).nullish(),
+    category: categorySchema,
+    condition: conditionSchema,
+    valueLeaves: leafAmountSchema.nullish(),
+    images: z.array(z.string().trim().max(MAX_URL)).max(10).optional(),
+    wantedItems: optionalText(MAX_WANTED),
+    imageHash: z.string().trim().max(128).nullish(),
+    imageHashes: imageHashesField,
+    ...itemPickupFields,
+    ...itemHubField,
+    ...itemLookingForField,
+    ...itemPerishableFields,
+  }),
+).refine((v) => !!(v.title ?? v.wantedItem), {
   message: "title is required",
   path: ["title"],
 })
 
+/**
+ * `isPerishable` is NOT editable here, and that is deliberate.
+ *
+ * The window is measured from `createdAt`, so flipping an old standard listing
+ * to perishable would give it a window that expired before it was set — and
+ * flipping a perishable back to standard is a way to shed a window that is
+ * about to close. Either direction is a listing lying about its own clock. The
+ * owner deletes and reposts, which is what "this is a different batch" means.
+ *
+ * `lookingForCategories` IS editable: it is a preference, it has no clock, and
+ * an owner whose wants change should not have to relist to say so.
+ */
 export const updateItemSchema = z.object({
   title: text(MAX_TITLE).optional(),
   description: z.string().trim().max(MAX_DESCRIPTION).optional(),
@@ -270,6 +388,7 @@ export const updateItemSchema = z.object({
   imageHashes: imageHashesField,
   ...itemPickupFields,
   ...itemHubField,
+  ...itemLookingForField,
 })
 
 // ── Offers, trades, messages ─────────────────────────────────────────────────

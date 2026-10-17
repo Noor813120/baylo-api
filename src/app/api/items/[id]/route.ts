@@ -1,8 +1,12 @@
 import { NextRequest, NextResponse } from "next/server"
 import { resolveSession } from "@/lib/api-auth"
+import { resolveListingOwners } from "@/lib/listing-owner"
+import { legacyOrgRefusal } from "@/lib/inbox"
 import prisma from "@/lib/prisma"
 import { parseBody, updateItemSchema } from "@/lib/validation"
-import { imageHashRows, leadImageHash } from "@/lib/image-hashes"
+import { imageHashRows } from "@/lib/image-hashes"
+import { ITEM_IMAGES, imagesJson, replaceItemImages, setItemImageHashes } from "@/lib/item-images"
+import { replaceWantedCategories } from "@/lib/wanted-categories"
 import { decideItemValue, reviewNotice } from "@/lib/valuation-server"
 import { isBlockedEitherWay } from "@/lib/blocking"
 import {
@@ -115,8 +119,8 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
         userId: true, category: true, condition: true, valueLeaves: true, status: true,
         // Compared against the incoming array to tell a real photo change from
         // the web wizard restating the images it already had. See the hash
-        // block below.
-        images: true,
+        // block below. Ordered rows since schema v2; see @/lib/item-images.
+        images: ITEM_IMAGES,
         // The hubs this listing ALREADY has. Needed by resolveHubIds() below,
         // which permits a deactivated hub to be RETAINED but not newly added --
         // see the long note on that function for why the symmetric rule makes
@@ -125,7 +129,11 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
       },
     })
     if (!item) return NextResponse.json({ error: "Not found" }, { status: 404 })
-    if (item.userId !== session.user.id) return NextResponse.json({ error: "Forbidden" }, { status: 403 })
+    // The person's own listing, or -- acting as a shop they are an ACTIVE
+    // member of -- the shop's. See @/lib/listing-owner.
+    const owners = await resolveListingOwners(session.user.id, req.headers)
+    if (!owners.ok) return legacyOrgRefusal(owners.message)
+    if (!owners.ownerIds.includes(item.userId)) return NextResponse.json({ error: "Forbidden" }, { status: 403 })
 
     const parsed = await parseBody(req, updateItemSchema)
     if (!parsed.ok) return parsed.response
@@ -171,7 +179,7 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
           { status: 409 },
         )
       }
-      const standing = await prisma.offer.count({ where: { postId: id, status: "PENDING" } })
+      const standing = await prisma.trade.count({ where: { requestedItemId: id, offerStatus: "PENDING" } })
       if (standing > 0) {
         return NextResponse.json(
           {
@@ -259,7 +267,7 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
     //   - otherwise -> leave the rows alone.
     const imagesChanged =
       body.images !== undefined &&
-      JSON.stringify(body.images) !== item.images
+      JSON.stringify(body.images) !== imagesJson(item.images)
     const hashesTouched = body.imageHashes !== undefined || imagesChanged
     const hashRows = imageHashRows(body)
 
@@ -274,9 +282,7 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
         // arrives with suggestedLeaves and valuationSource so the three columns
         // are always written together and cannot describe different valuations.
         ...valuationData,
-        ...(body.images !== undefined && { images: JSON.stringify(body.images) }),
         ...(body.wantedItems !== undefined && { wantedItems: body.wantedItems }),
-        ...(hashesTouched && { imageHash: leadImageHash(hashRows) }),
         ...(pickupTouched
           ? hasPickup
             ? {
@@ -319,31 +325,39 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
     // statement wide, and the worst a concurrent check sees is this listing's
     // own photos missing from the pool for that moment. Its owner is not the
     // person that pool is defending against.
-    if (hashesTouched) {
-      await prisma.$transaction(async (tx) => {
-        await tx.itemImageHash.deleteMany({ where: { itemId: id } })
-        if (hashRows.length > 0) {
-          await tx.itemImageHash.createMany({
-            data: hashRows.map((r) => ({ itemId: id, ...r })),
-          })
-        }
-      })
+    //
+    // Schema v2: photos and hashes are one table (ItemImage). Changed photos
+    // are rewritten with whatever hashes came with them; unchanged photos
+    // with a restated hash list get only their hashes rewritten.
+    if (imagesChanged) {
+      await prisma.$transaction((tx) => replaceItemImages(tx, id, body.images ?? [], hashRows))
+    } else if (hashesTouched) {
+      await prisma.$transaction((tx) => setItemImageHashes(tx, id, hashRows))
     }
 
-    // Re-read only when the hubs actually moved: the `updated` row above was
-    // selected before the join was rewritten, so its safeZones are stale in
-    // exactly that case and correct in every other.
-    const finalRow = hubs?.ok
+    // What the owner wants back, restated in full like hubIds: `[]` clears it.
+    // (Until it was wired here an edit left the matcher reading the ORIGINAL
+    // categories forever.) ItemWantedCategory rows since schema v2.
+    const wantedTouched = body.lookingForCategories !== undefined
+    if (wantedTouched) {
+      await prisma.$transaction((tx) => replaceWantedCategories(tx, id, body.lookingForCategories ?? []))
+    }
+
+    // Re-read only when a child table moved (hubs, photos, wanted categories):
+    // the `updated` row above was selected before those were rewritten, so it
+    // is stale in exactly those cases and correct in every other.
+    const finalRow = hubs?.ok || hashesTouched || wantedTouched
       ? await prisma.item.findUniqueOrThrow({ where: { id }, select: ITEM_WITH_HUBS_SELECT })
       : updated
 
-    return NextResponse.json({ ...shapeItemWithHubs(finalRow, session.user.id), valueReview })
+    // As the listing's owner, so a shop member gets the precise pickup back.
+    return NextResponse.json({ ...shapeItemWithHubs(finalRow, item.userId), valueReview })
   } catch {
     return NextResponse.json({ error: "Internal server error" }, { status: 500 })
   }
 }
 
-export async function DELETE(_req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+export async function DELETE(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
   try {
     const session = await resolveSession()
     if (!session?.user?.id) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
@@ -351,7 +365,9 @@ export async function DELETE(_req: NextRequest, ctx: { params: Promise<{ id: str
     const { id } = await ctx.params
     const item = await prisma.item.findUnique({ where: { id }, select: { userId: true } })
     if (!item) return NextResponse.json({ error: "Not found" }, { status: 404 })
-    if (item.userId !== session.user.id) return NextResponse.json({ error: "Forbidden" }, { status: 403 })
+    const owners = await resolveListingOwners(session.user.id, req.headers)
+    if (!owners.ok) return legacyOrgRefusal(owners.message)
+    if (!owners.ownerIds.includes(item.userId)) return NextResponse.json({ error: "Forbidden" }, { status: 403 })
 
     // Soft delete, and the pickup point goes with it — a delisted item has no
     // reason to keep the owner's coordinates on file.
@@ -366,9 +382,9 @@ export async function DELETE(_req: NextRequest, ctx: { params: Promise<{ id: str
         where: { id },
         data: { status: "REMOVED", pickupLat: null, pickupLng: null, pickupAddress: null },
       })
-      const closed = await tx.listingAppeal.updateMany({
-        where: { itemId: id, status: "OPEN" },
-        data: { status: "WITHDRAWN", decidedAt: new Date(), decisionReason: "Withdrawn: the owner deleted the listing." },
+      const closed = await tx.moderationCase.updateMany({
+        where: { type: "LISTING_APPEAL", itemId: id, status: "OPEN" },
+        data: { status: "WITHDRAWN", decidedAt: new Date(), decisionNote: "Withdrawn: the owner deleted the listing." },
       })
       return closed.count
     })

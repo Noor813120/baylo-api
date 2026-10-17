@@ -2,9 +2,11 @@ import { NextRequest } from "next/server"
 import { z } from "zod"
 import { resolveSession } from "@/lib/api-auth"
 import prisma from "@/lib/prisma"
-import { ok, unauthenticated, invalid } from "@/lib/v1/envelope"
+import { ok, fail, unauthenticated, invalid } from "@/lib/v1/envelope"
+import { resolveInbox, shopBellWhere } from "@/lib/inbox"
 import { parseQuery, paginationShape } from "@/lib/v1/query"
 import { decodeCursor, encodeCursor, paginate, olderThan } from "@/lib/v1/cursor"
+import { ITEM_IMAGES, toImageUrls, type ImagesLike } from "@/lib/item-images"
 
 export const dynamic = "force-dynamic"
 
@@ -47,22 +49,31 @@ const querySchema = z.strictObject({
   unread: z.enum(["0", "1"]).optional(),
 })
 
-const ACTOR_BRIEF = { id: true, name: true, avatar: true } as const
+/**
+ * `isOrgAccount` rides along so the client can draw a shop without a logo as a
+ * shop. An org's backing row carries its logo in `avatar` (see the PATCH route
+ * for organisations), and with no logo the only other honest fallback is a
+ * person silhouette -- which is the wrong thing to put next to a business.
+ */
+const ACTOR_BRIEF = { id: true, name: true, avatar: true, isOrgAccount: true } as const
 
-function firstImage(raw: string | null | undefined): string | null {
-  if (!raw) return null
-  try {
-    const images: unknown = JSON.parse(raw)
-    return Array.isArray(images) && typeof images[0] === "string" ? images[0] : null
-  } catch {
-    return null
-  }
+function firstImage(raw: ImagesLike): string | null {
+  return toImageUrls(raw)[0] ?? null
 }
 
 export async function GET(req: NextRequest) {
   const session = await resolveSession()
   if (!session?.user?.id) return unauthenticated()
-  const viewerId = session.user.id
+
+  // Acting as a shop, the bell is the SHOP's: its NEW_MESSAGE rows, and
+  // anything else addressed to the backing row. Same inbox as Messages, and the
+  // same count /api/v1/home badges. See @/lib/inbox.
+  const inbox = await resolveInbox(session.user.id, req.headers)
+  if (!inbox.ok) return fail("ORG_CONTEXT_REFUSED", inbox.message)
+  const viewerId = inbox.inboxId
+  // A shop's bell lists only the types that work as the shop. The same clause
+  // gates the count below and /api/v1/home's badge, so they agree.
+  const bellFilter = inbox.acting.organization ? [shopBellWhere()] : []
 
   const parsed = parseQuery(req, querySchema)
   if (!parsed.ok) return parsed.response
@@ -75,6 +86,7 @@ export async function GET(req: NextRequest) {
       userId: viewerId,
       ...(parsed.data.unread === "1" ? { read: false } : {}),
       ...(olderThan(cursor) ?? {}),
+      AND: bellFilter,
     },
     select: {
       id: true,
@@ -90,16 +102,38 @@ export async function GET(req: NextRequest) {
     take: limit + 1,
   })
 
+  // "listing_review" rows are about the recipient's own listing and carry no
+  // actor (an expiry, a takedown), so the listing's photo is their picture too.
   const itemIds = rows
-    .filter((row) => row.entityType === "item" && row.entityId)
+    .filter((row) => (row.entityType === "item" || row.entityType === "listing_review") && row.entityId)
     .map((row) => row.entityId as string)
   const itemImages = new Map<string, string | null>()
   if (itemIds.length > 0) {
     const items = await prisma.item.findMany({
       where: { id: { in: itemIds } },
-      select: { id: true, images: true },
+      select: { id: true, images: ITEM_IMAGES },
     })
     for (const item of items) itemImages.set(item.id, firstImage(item.images))
+  }
+
+  // ── The organisation a row is ABOUT ───────────────────────────────────────────
+  //
+  // An organisation-review row has no actor at all, so it rendered as a blank
+  // grey tile while every other kind of notification had a face or a photo. Its
+  // subject is a shop, so the shop's logo is the picture.
+  //
+  // 'organization' carries an Organization id. ('org_invite' notifications
+  // went with organisation staff in schema v2; the migration deleted them.)
+  const orgIds = rows
+    .filter((row) => row.entityType === "organization" && row.entityId)
+    .map((row) => row.entityId as string)
+  const orgBriefs = new Map<string, { id: string; name: string; logoUrl: string | null }>()
+  if (orgIds.length > 0) {
+    const orgs = await prisma.organization.findMany({
+      where: { id: { in: orgIds } },
+      select: { id: true, name: true, logoUrl: true },
+    })
+    for (const o of orgs) orgBriefs.set(`organization:${o.id}`, o)
   }
 
   const { page, nextCursor } = paginate(rows, limit, (r) => encodeCursor(r.createdAt, r.id))
@@ -108,7 +142,7 @@ export async function GET(req: NextRequest) {
   // shows a page; the count has to describe the whole list or it disagrees with
   // the bell the moment there are more unread rows than fit on one page.
   const unreadCount = await prisma.notification.count({
-    where: { userId: viewerId, read: false },
+    where: { userId: viewerId, read: false, AND: bellFilter },
   })
 
   return ok(
@@ -121,8 +155,11 @@ export async function GET(req: NextRequest) {
         createdAt: n.createdAt.toISOString(),
         entityType: n.entityType,
         entityId: n.entityId,
-        itemImage: n.entityType === "item" && n.entityId ? itemImages.get(n.entityId) ?? null : null,
-        actor: n.actor ? { id: n.actor.id, name: n.actor.name, avatar: n.actor.avatar } : null,
+        itemImage: n.entityId && (n.entityType === "item" || n.entityType === "listing_review") ? itemImages.get(n.entityId) ?? null : null,
+        org: (n.entityId && orgBriefs.get(`${n.entityType}:${n.entityId}`)) || null,
+        actor: n.actor
+          ? { id: n.actor.id, name: n.actor.name, avatar: n.actor.avatar, isOrg: n.actor.isOrgAccount }
+          : null,
       })),
       unreadCount,
     },

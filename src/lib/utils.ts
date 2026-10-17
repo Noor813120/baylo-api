@@ -33,7 +33,6 @@ export const CATEGORIES = [
   "PETS",
   "PLANTS",
   "FOOD",
-  "SERVICES",
   "OTHER",
 ] as const
 

@@ -1,5 +1,6 @@
 import { PrismaClient } from "@/generated/prisma/client"
 import { PrismaPg } from "@prisma/adapter-pg"
+import { assertV2Schema, databaseSchema } from "@/lib/db-schema"
 
 // Postgres (Supabase) via the pg driver adapter. Prisma 7's `prisma-client`
 // generator has no built-in engine, so an adapter is required, not optional.
@@ -38,8 +39,12 @@ import { PrismaPg } from "@prisma/adapter-pg"
 // than the native client's request timeout, so the failure is now a real
 // error in the server log rather than a silent stall.
 //
-// The pool is small on purpose: five is plenty for one dev server plus one
-// script, and stays under the tenant's backend count even on the session URL.
+// The pool is small on purpose on the session URL: five stays under the
+// tenant's backend count. On the transaction pooler a client holds a backend
+// only for the length of one statement, so the limit there is ten -- the hot
+// routes (/api/v1/home, /api/v1/browse) send their independent queries in
+// parallel, and with five the second half of each batch queued behind the
+// first, costing a whole extra round trip to the database.
 //
 // ── `?schema=` IS HONOURED HERE, NOT BY THE DRIVER ──────────────────────────
 //
@@ -53,6 +58,9 @@ import { PrismaPg } from "@prisma/adapter-pg"
 // No parameter means `public`, which is the live database.
 function createPrismaClient() {
   const schema = databaseSchema()
+  // SCHEMA V2 GUARD (post-cutover form): refuses names that cannot be an app
+  // schema; the startup layout check refuses any pre-v2 schema. See @/lib/db-schema.
+  assertV2Schema(schema)
   const raw = (schema === "public" && process.env.DATABASE_POOL_URL) || process.env.DATABASE_URL!
   // The live URL is passed through UNTOUCHED. Only a scratch URL is
   // re-serialised (to strip the parameter pg would choke on), so nothing about
@@ -64,20 +72,33 @@ function createPrismaClient() {
     connectionString = url.toString()
   }
   const adapter = new PrismaPg(
-    { connectionString, max: 5, connectionTimeoutMillis: 10_000 },
+    {
+      connectionString,
+      // Ten on the transaction pooler: /home and /browse send their independent
+      // queries in parallel, and five made the second half of each batch queue.
+      max: schema === "public" && process.env.DATABASE_POOL_URL ? 10 : 5,
+      connectionTimeoutMillis: 10_000,
+      // ── RAW SQL STAYS ON THE COPY (schema v2) ──────────────────────────────
+      // The adapter's `schema` option qualifies MODEL queries only. A
+      // $queryRaw/$executeRaw with a bare "Message" resolves through the
+      // connection's search_path, which defaults to public -- live -- so a
+      // process on a scratch schema read (or wrote) live rows. That is how
+      // live data was lost on 23 Sep 2026. Setting search_path on every pooled
+      // connection makes an unqualified table resolve to the scratch schema;
+      // public is not on the path at all. `extensions` stays on it: Supabase
+      // installs extension objects there (pg_stat_statements, gen_random_uuid)
+      // and it holds no app tables.
+      ...(schema !== "public" ? { options: `-c search_path="${schema}",extensions` } : {}),
+    },
     schema !== "public" ? { schema } : undefined,
   )
   return new PrismaClient({ adapter })
 }
 
-/** The schema this process talks to. "public" is live. Scripts print it so a run says where it ran. */
-export function databaseSchema(): string {
-  try {
-    return new URL(process.env.DATABASE_URL ?? "").searchParams.get("schema") ?? "public"
-  } catch {
-    return "public"
-  }
-}
+// databaseSchema() and the v2 guard live in a side-effect-free module so the
+// startup check can run before this one constructs a client. Re-exported here
+// because scripts and routes import databaseSchema from @/lib/prisma.
+export { databaseSchema, assertV2Schema }
 
 const globalForPrisma = globalThis as unknown as { prisma: PrismaClient }
 

@@ -4,11 +4,14 @@ import { resolveSession } from "@/lib/api-auth"
 import prisma from "@/lib/prisma"
 import { leafBalances } from "@/lib/leaves"
 import { expireStaleOffers } from "@/lib/offers"
-import { ok, unauthenticated, invalid } from "@/lib/v1/envelope"
+import { ok, unauthenticated, invalid, fail } from "@/lib/v1/envelope"
+import { resolveTradeViewer } from "@/lib/trade-participant"
 import { parseQuery, paginationShape, MAX_LIMIT } from "@/lib/v1/query"
 import { decodeCursor, encodeCursor, paginate, cursorDate } from "@/lib/v1/cursor"
 import { SAFE_ZONE_HUB_SELECT, v1Hub, type SafeZoneHubRow } from "@/lib/safe-zones"
 import { MEETUP_SELECT, v1MeetupPlan } from "@/lib/meetup"
+import { MAX_CODE_ATTEMPTS } from "@/lib/swap-code"
+import { ITEM_IMAGES, toImageUrls, type ImagesLike } from "@/lib/item-images"
 
 export const dynamic = "force-dynamic"
 
@@ -17,7 +20,7 @@ export const dynamic = "force-dynamic"
  *
  * FIVE Prisma calls, not the four the shapes proposed. The proposal counted
  * "viewer balance plus pending-offer sum" as one step; it is two calls
- * (user.findUnique + offer.aggregate), and they live behind leafBalances() so
+ * (user.findUnique + trade.aggregate), and they live behind leafBalances() so
  * the over-commit clamp stays in one place rather than being inlined here.
  * Reported honestly rather than rounded down:
  *
@@ -25,12 +28,14 @@ export const dynamic = "force-dynamic"
  *   3    trades page
  *   4    offers
  *   5    pending incoming count
- *   6    values for the items inside those offers -- skipped when there are none
  *
- * The sixth is the price of `offeredItems` being a client-written JSON blob
- * rather than a relation: the ids in it can be trusted as identifiers and
- * nothing in it can be trusted as a fact, so the values are looked up. Both
- * items on a TRADE are real relations and cost nothing extra.
+ * There used to be a sixth, for the values of the items inside the offers'
+ * client-written `offeredItems` JSON. Since schema v2 the offered item is a
+ * real relation on the deal's row, as both items on a trade always were.
+ *
+ * Offers and trades are one Trade row per deal since schema v2: "trades" are
+ * the rows in their trade phase (`status` set) and "offers" the rows still in
+ * their offer phase (`offerStatus` PENDING).
  *
  * `kind` is the whole point of D2. The client is never told that
  * offeredItemId === requestedItemId means anything, because here it does not
@@ -47,14 +52,8 @@ const querySchema = z.strictObject({
 })
 
 /** First image of an item, or null. Stored as a JSON string. */
-function firstImage(raw: string | null | undefined): string | null {
-  if (!raw) return null
-  try {
-    const parsed: unknown = JSON.parse(raw)
-    return Array.isArray(parsed) && typeof parsed[0] === "string" ? parsed[0] : null
-  } catch {
-    return null
-  }
+function firstImage(raw: ImagesLike): string | null {
+  return toImageUrls(raw)[0] ?? null
 }
 
 /**
@@ -75,7 +74,7 @@ function firstImage(raw: string | null | undefined): string | null {
 const ITEM_BRIEF = {
   id: true,
   title: true,
-  images: true,
+  images: ITEM_IMAGES,
   status: true,
   valueLeaves: true,
 } as const
@@ -84,7 +83,16 @@ const USER_BRIEF = { id: true, name: true, avatar: true } as const
 export async function GET(req: NextRequest) {
   const session = await resolveSession()
   if (!session?.user?.id) return unauthenticated()
-  const viewerId = session.user.id
+
+  // Whose list: acting as a shop (X-Baylo-Org, ACTIVE membership) it is the
+  // SHOP's -- its trades, its offers, its balance -- and only the shop's, the
+  // way the shop's Messages are (26 Sep 2026). Every query below keys on
+  // `viewerId`, so this one line is the whole switch. A dead context is
+  // refused, not silently answered with the person's list under a screen that
+  // says it is the shop's. See @/lib/trade-participant.
+  const viewer = await resolveTradeViewer(session.user.id, req.headers)
+  if (!viewer.ok) return fail("ORG_CONTEXT_REFUSED", viewer.message)
+  const viewerId = viewer.viewerId
 
   const parsed = parseQuery(req, querySchema)
   if (!parsed.ok) return parsed.response
@@ -119,12 +127,12 @@ export async function GET(req: NextRequest) {
         }
       : undefined
 
-  const tradeRows = await prisma.tradeRequest.findMany({
+  const tradeRows = await prisma.trade.findMany({
     where: {
       status: { in: [...states] },
       OR: [
-        { senderId: viewerId, hiddenBySender: false },
-        { receiverId: viewerId, hiddenByReceiver: false },
+        { senderId: viewerId },
+        { receiverId: viewerId },
       ],
       ...(keyset ?? {}),
     },
@@ -149,7 +157,8 @@ export async function GET(req: NextRequest) {
       // not being drawn at all. Five columns on a SELECT already happening, plus
       // the hub join the claim above is already paying for.
       ...MEETUP_SELECT,
-      createdAt: true,
+      // When the deal became a trade; the wire's `createdAt` (see below).
+      tradeCreatedAt: true,
       updatedAt: true,
       senderId: true,
       receiverId: true,
@@ -168,8 +177,9 @@ export async function GET(req: NextRequest) {
         select: { reviewerId: true, rating: true },
       },
       // Code state, so canConfirm is a real answer rather than a guess from
-      // status alone. At most two rows per trade.
-      swapConfirmationCodes: { select: { userId: true, used: true, expiresAt: true } },
+      // status alone. At most two rows per trade. `attempts` is for codesLive:
+      // a pair burned by MAX_CODE_ATTEMPTS is as dead as an expired one.
+      swapCodes: { select: { userId: true, used: true, expiresAt: true, attempts: true } },
     },
     orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
     take: limit + 1,
@@ -181,13 +191,14 @@ export async function GET(req: NextRequest) {
   // ── 4 ── offers in both directions. Capped, not paginated: the shapes put the
   // cursor on `trades`, and a screen showing more than 50 live offers has a
   // different problem than pagination.
-  const offerRows = await prisma.offer.findMany({
-    where: { OR: [{ senderId: viewerId }, { receiverId: viewerId }], status: "PENDING" },
+  const offerRows = await prisma.trade.findMany({
+    where: { OR: [{ senderId: viewerId }, { receiverId: viewerId }], offerStatus: "PENDING" },
     select: {
-      id: true, status: true, offeredItems: true, offeredLeaves: true,
+      id: true, offerStatus: true, offeredLeaves: true,
       bridgeFeeLeaves: true, offeredBracket: true, targetBracket: true,
       message: true, createdAt: true, senderId: true, receiverId: true,
-      post: { select: ITEM_BRIEF },
+      offeredItem: { select: { id: true, title: true, valueLeaves: true } },
+      requestedItem: { select: ITEM_BRIEF },
       sender: { select: USER_BRIEF },
       receiver: { select: USER_BRIEF },
     },
@@ -196,8 +207,8 @@ export async function GET(req: NextRequest) {
   })
 
   // ── 5 ── incoming still awaiting this viewer.
-  const pendingIncoming = await prisma.tradeRequest.count({
-    where: { receiverId: viewerId, status: "PENDING", hiddenByReceiver: false },
+  const pendingIncoming = await prisma.trade.count({
+    where: { receiverId: viewerId, status: "PENDING" },
   })
 
   const now = Date.now()
@@ -220,11 +231,33 @@ export async function GET(req: NextRequest) {
 
     // The viewer submits their PARTNER's code, so it is the partner's row that
     // records whether this viewer has already confirmed.
-    const partnerCode = t.swapConfirmationCodes.find((c) => c.userId === partnerId)
+    const partnerCode = t.swapCodes.find((c) => c.userId === partnerId)
     const partnerCodeLive = !!partnerCode && partnerCode.expiresAt.getTime() > now
     const canConfirm =
       t.status === "ACCEPTED" ||
       (t.status === "CONFIRMING" && (!partnerCodeLive || !partnerCode.used))
+
+    /*
+     * Whether there is a code to SHOW right now, which canConfirm does not say:
+     * an expired CONFIRMING trade is still the viewer's move (canConfirm true)
+     * but its codes are dead, and its card must offer to start the handoff
+     * again rather than "Show code". The test is confirm/start's own
+     * idempotency check -- both rows unexpired and unburned -- so codesLive is
+     * true exactly when opening the code panel would NOT issue a fresh pair.
+     *
+     * codesExpireAt is the earlier of the two expiries, so the client can flip
+     * the card itself when the window closes. Sent whenever both rows exist and
+     * that instant is still ahead, INCLUDING a burned pair: that is how the
+     * client tells "locked" (attempts spent, window open) from "expired".
+     */
+    const codes = t.swapCodes
+    const codesLive =
+      codes.length === 2 &&
+      codes.every((c) => c.expiresAt.getTime() > now && c.attempts < MAX_CODE_ATTEMPTS)
+    const firstExpiry =
+      codes.length === 2 ? Math.min(...codes.map((c) => c.expiresAt.getTime())) : null
+    const codesExpireAt =
+      firstExpiry !== null && firstExpiry > now ? new Date(firstExpiry) : null
 
     return {
       id: t.id,
@@ -268,7 +301,7 @@ export async function GET(req: NextRequest) {
       offeredItem:
         t.offeredItemId === t.requestedItemId
           ? null
-          : { ...t.offeredItem, image: firstImage(t.offeredItem.images), images: undefined },
+          : { ...t.offeredItem!, image: firstImage(t.offeredItem!.images), images: undefined },
       requestedItem: {
         ...t.requestedItem,
         image: firstImage(t.requestedItem.images),
@@ -287,88 +320,37 @@ export async function GET(req: NextRequest) {
        */
       meetup: v1MeetupPlan(t),
       canConfirm,
-      createdAt: t.createdAt,
+      codesLive,
+      codesExpireAt,
+      // What TradeRequest.createdAt was: the moment the deal became a trade.
+      createdAt: t.tradeCreatedAt,
       updatedAt: t.updatedAt,
     }
   })
 
-  /*
-   * ── VALUES FOR `offeredItems`, LOOKED UP RATHER THAN TRUSTED ──────────────
-   *
-   * `Offer.offeredItems` is a JSON string the CLIENT sent at offer time. It
-   * holds `{ id, title, image }` and it is client-asserted: a caller can put any
-   * title in it, and could put any `valueLeaves` in it if the shape had one.
-   *
-   * So the values do not come from there. The ids do, and the values come from
-   * the Item table in one query — the same treatment `post` already gets by
-   * being a real relation. A client that renders the number this returns is
-   * rendering something the server stands behind.
-   *
-   * One query for the whole page, capped by MAX_LIMIT offers times however many
-   * items each carries. Skipped entirely when there are no offers.
-   */
-  const offeredItemIds = [
-    ...new Set(
-      offerRows.flatMap((o) => {
-        try {
-          const parsed: unknown = JSON.parse(o.offeredItems)
-          return Array.isArray(parsed)
-            ? parsed
-                .filter((x): x is Record<string, unknown> => !!x && typeof x === "object")
-                .map((x) => String(x.id ?? ""))
-                .filter(Boolean)
-            : []
-        } catch {
-          return []
-        }
-      }),
-    ),
-  ]
-
-  const offeredItemValues = new Map<string, number | null>()
-  if (offeredItemIds.length > 0) {
-    const rows = await prisma.item.findMany({
-      where: { id: { in: offeredItemIds } },
-      select: { id: true, valueLeaves: true },
-    })
-    for (const r of rows) offeredItemValues.set(r.id, r.valueLeaves)
-  }
-
   const offers = offerRows.map((o) => {
     const isSender = o.senderId === viewerId
-    let offeredItems: {
+    /*
+     * `offeredItems` keeps its list shape on the wire, built from the real
+     * relation (schema v2) where it used to be parsed out of a client-written
+     * JSON blob. `valueLeaves` comes from the Item row, as it always did.
+     * `image` stays null: the blob every offer since 16 Sep 2026 wrote held
+     * only `{ id, title }`, so null is what this field has always carried, and
+     * the app draws offered items from their own records.
+     */
+    const offeredItems: {
       id: string
       title: string
       image: string | null
-      /** From the Item table, not from the stored JSON. See the note above. */
       valueLeaves: number | null
-    }[] = []
-    try {
-      const parsedItems: unknown = JSON.parse(o.offeredItems)
-      if (Array.isArray(parsedItems)) {
-        offeredItems = parsedItems
-          .filter((x): x is Record<string, unknown> => !!x && typeof x === "object")
-          .map((x) => {
-            const itemId = String(x.id ?? "")
-            return {
-              id: itemId,
-              title: typeof x.title === "string" ? x.title : "Item",
-              image: typeof x.image === "string" ? x.image : null,
-              // `?? null` covers two different cases with the same answer: the
-              // item was never valued, and the item no longer exists. Neither is
-              // a number, and neither is zero.
-              valueLeaves: offeredItemValues.get(itemId) ?? null,
-            }
-          })
-      }
-    } catch {
-      offeredItems = []
-    }
+    }[] = o.offeredItem
+      ? [{ id: o.offeredItem.id, title: o.offeredItem.title, image: null, valueLeaves: o.offeredItem.valueLeaves }]
+      : []
     return {
       id: o.id,
       direction: isSender ? "sent" : "received",
-      status: o.status,
-      post: { ...o.post, image: firstImage(o.post.images), images: undefined },
+      status: o.offerStatus,
+      post: { ...o.requestedItem, image: firstImage(o.requestedItem.images), images: undefined },
       offeredItems,
       offeredLeaves: o.offeredLeaves,
       message: o.message,

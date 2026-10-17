@@ -70,25 +70,25 @@ async function main() {
 
   head("2  a live Premium subscriber")
   const premiumUser = await prisma.user.create({
-    data: { name: "Premium", email: `${P}premium@example.com`, isVerified: true, leaves: 0, premiumUntil: future },
+    data: { name: "Premium", email: `${P}premium@example.com`, isVerified: true, leaves: 0, subscriptions: { create: { tier: "PREMIUM", endsAt: future } } },
   })
   check("earns PREMIUM_SUBSCRIBER", await hasBadge(premiumUser.id))
 
   head("3  VIP is a superset")
   const vipUser = await prisma.user.create({
-    data: { name: "Vip", email: `${P}vip@example.com`, isVerified: true, leaves: 0, vipUntil: future },
+    data: { name: "Vip", email: `${P}vip@example.com`, isVerified: true, leaves: 0, subscriptions: { create: { tier: "VIP", endsAt: future } } },
   })
   check("a VIP-only user (no premiumUntil) also earns it", await hasBadge(vipUser.id))
 
   head("4  permanence after lapse")
-  await prisma.user.update({ where: { id: premiumUser.id }, data: { premiumUntil: past } })
+  await prisma.subscription.updateMany({ where: { userId: premiumUser.id }, data: { endsAt: past } })
   check("still shows unlocked after the subscription lapses", await hasBadge(premiumUser.id))
-  const row = await prisma.userAchievement.findUnique({
+  const row = await prisma.userProgress.findUnique({
     where: { userId_achievementId: { userId: premiumUser.id, achievementId: def.id } },
   })
   check("the UserAchievement row itself still exists", row !== null)
 
-  await prisma.userAchievement.deleteMany({ where: { achievementId: def.id } })
+  await prisma.userProgress.deleteMany({ where: { achievementId: def.id } })
   await prisma.achievement.delete({ where: { id: def.id } })
   await cleanup()
   console.log(`\n${pass} passed, ${fail} failed`)

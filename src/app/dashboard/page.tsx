@@ -1,6 +1,8 @@
 import { auth } from "@/../auth"
 import { redirect } from "next/navigation"
 import prisma from "@/lib/prisma"
+import { asTrades } from "@/lib/trade-row"
+import { ITEM_IMAGES, firstImageUrl } from "@/lib/item-images"
 import { preciseAccessItemIds, resolvePickup } from "@/lib/item-visibility"
 import BayloDashboard from "./baylo-dashboard"
 import {
@@ -43,7 +45,6 @@ const CATEGORY_LABEL: Record<string, string> = {
   TOYS: "Kids & Toys",
   TOOLS: "Tools & DIY",
   FOOD: "Food",
-  SERVICES: "Services",
   OTHER: "Other",
 }
 
@@ -56,7 +57,6 @@ const CATEGORY_HASHTAG: Record<string, string> = {
   TOYS:        "#KidsToys",
   TOOLS:       "#ToolsDIY",
   FOOD:        "#Food",
-  SERVICES:    "#Services",
   OTHER:       "#Miscellaneous",
 }
 
@@ -85,30 +85,30 @@ export default async function DashboardPage() {
     completedTradesRaw, weeklyTradesRaw, trendingRaw,
     myItemCatsRaw, matchCandidatesRaw, tasksRaw,
   ] = await Promise.all([
-    prisma.tradeRequest.findMany({
+    prisma.trade.findMany({
       where: { senderId: user.id, status: { in: ["PENDING", "ACCEPTED", "CONFIRMING"] } },
       select: {
         id: true, status: true,
-        offeredItemId: true, requestedItemId: true,
+        offeredItemId: true, requestedItemId: true, offeredLeaves: true,
         receiver:      { select: { id: true, name: true } },
         offeredItem:   { select: { title: true } },
         requestedItem: { select: { title: true } },
       },
       orderBy: { updatedAt: "desc" },
       take: 3,
-    }),
-    prisma.tradeRequest.findMany({
+    }).then(asTrades),
+    prisma.trade.findMany({
       where: { receiverId: user.id, status: { in: ["PENDING", "ACCEPTED", "CONFIRMING"] } },
       select: {
         id: true, status: true,
-        offeredItemId: true, requestedItemId: true,
+        offeredItemId: true, requestedItemId: true, offeredLeaves: true,
         sender:        { select: { id: true, name: true } },
         offeredItem:   { select: { title: true } },
         requestedItem: { select: { title: true } },
       },
       orderBy: { updatedAt: "desc" },
       take: 3,
-    }),
+    }).then(asTrades),
     prisma.message.findMany({
       where: { OR: [{ senderId: user.id }, { receiverId: user.id }] },
       include: {
@@ -128,6 +128,7 @@ export default async function DashboardPage() {
     prisma.item.findMany({
       where: { status: "AVAILABLE" },
       include: {
+        images: ITEM_IMAGES,
         user: { select: { id: true, name: true, location: true } },
         likes: { select: { userId: true } },
         _count: { select: { comments: true } },
@@ -161,7 +162,7 @@ export default async function DashboardPage() {
       _count: { id: true },
     }),
     // Weekly completed trades count for the weekly goal widget
-    prisma.tradeRequest.count({
+    prisma.trade.count({
       where: {
         OR: [{ senderId: user.id }, { receiverId: user.id }],
         status: "COMPLETED",
@@ -178,7 +179,7 @@ export default async function DashboardPage() {
       select: { followeeId: true, status: true },
     }),
     // All completed trades with categories — for real eco impact calculation
-    prisma.tradeRequest.findMany({
+    prisma.trade.findMany({
       where: {
         OR: [{ senderId: user.id }, { receiverId: user.id }],
         status: "COMPLETED",
@@ -188,9 +189,9 @@ export default async function DashboardPage() {
         offeredItem:   { select: { category: true } },
         requestedItem: { select: { category: true } },
       },
-    }),
+    }).then(asTrades),
     // Completed trades THIS WEEK with categories — for weekly CO₂
-    prisma.tradeRequest.findMany({
+    prisma.trade.findMany({
       where: {
         OR: [{ senderId: user.id }, { receiverId: user.id }],
         status: "COMPLETED",
@@ -201,7 +202,7 @@ export default async function DashboardPage() {
         offeredItem:   { select: { category: true } },
         requestedItem: { select: { category: true } },
       },
-    }),
+    }).then(asTrades),
     // Trending: most-used categories in the last 7 days
     prisma.item.groupBy({
       by: ["category"],
@@ -283,29 +284,13 @@ export default async function DashboardPage() {
     }
   })
 
-  // ── Leaves-only: look up offeredLeaves for active trades ─────────────────
+  // ── Leaves-only: offeredLeaves for active trades ─────────────────────────
+  // On the deal's own row since schema v2; it used to be recovered from the
+  // accepted Offer by sender + listing, which was not unique.
   const activeOfferedLeavesMap = new Map<string, number>()
-  const offerLookups = [
-    ...sentTrades
-      .filter((t) => isLeavesOnlyTrade(t.offeredItemId, t.requestedItemId))
-      .map((t) => ({ tradeId: t.id, senderId: user.id,     postId: t.requestedItemId })),
-    ...receivedTrades
-      .filter((t) => isLeavesOnlyTrade(t.offeredItemId, t.requestedItemId))
-      .map((t) => ({ tradeId: t.id, senderId: t.sender.id, postId: t.requestedItemId })),
-  ]
-
-  if (offerLookups.length > 0) {
-    const offerRecs = await prisma.offer.findMany({
-      where: {
-        OR: offerLookups.map(({ senderId, postId }) => ({ senderId, postId, status: "ACCEPTED" })),
-        offeredLeaves: { gt: 0 },
-      },
-      select: { senderId: true, postId: true, offeredLeaves: true },
-    })
-    const offerMap = new Map(offerRecs.map((o) => [`${o.senderId}:${o.postId}`, o.offeredLeaves ?? 0]))
-    for (const { tradeId, senderId, postId } of offerLookups) {
-      const lv = offerMap.get(`${senderId}:${postId}`)
-      if (lv) activeOfferedLeavesMap.set(tradeId, lv)
+  for (const t of [...sentTrades, ...receivedTrades]) {
+    if (isLeavesOnlyTrade(t.offeredItemId, t.requestedItemId) && (t.offeredLeaves ?? 0) > 0) {
+      activeOfferedLeavesMap.set(t.id, t.offeredLeaves as number)
     }
   }
 
@@ -385,11 +370,8 @@ export default async function DashboardPage() {
   const feedPickupAccess = await preciseAccessItemIds(user.id, items.map((i) => i.id))
 
   const feedPosts = items.map((item) => {
-    let imageUrl: string | undefined
-    try {
-      const imgs = JSON.parse(item.images)
-      if (Array.isArray(imgs) && imgs[0]) imageUrl = imgs[0]
-    } catch { /* malformed JSON — use gradient placeholder */ }
+    // No photo -> undefined -> the gradient placeholder.
+    const imageUrl: string | undefined = firstImageUrl(item.images) ?? undefined
     const wantsDisplay = wantedDisplay(item.wantedItems)
     const pickup = resolvePickup(item, user.id, feedPickupAccess)
     const tags = [CATEGORY_LABEL[item.category] ?? item.category]

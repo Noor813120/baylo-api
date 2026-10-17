@@ -1,7 +1,9 @@
 import Link from "next/link"
 import { auth } from "@root/auth"
 import prisma from "@/lib/prisma"
-import { suspensionState } from "@/lib/moderation"
+import { REPORT } from "@/lib/report-case"
+import { IN_TRADE_PHASE } from "@/lib/trade-row"
+import { suspensionState, activeSuspension, notSuspendedWhere, suspendedWhere } from "@/lib/moderation"
 import UserActions from "./UserActions"
 import { FilterChips } from "@/components/admin/FilterChips"
 import { StaggerGroup, StaggerItem } from "@/components/admin/Stagger"
@@ -64,14 +66,13 @@ export default async function UsersPage({ searchParams }: Props) {
       ...(status === "active"
         ? {
             deletedAt: null,
-            OR: [{ suspendedAt: null }, { suspendedUntil: { lte: now } }],
+            ...notSuspendedWhere(now),
           }
         : {}),
       ...(status === "suspended"
         ? {
             deletedAt: null,
-            suspendedAt: { not: null },
-            AND: [{ OR: [{ suspendedUntil: null }, { suspendedUntil: { gt: now } }] }],
+            ...suspendedWhere(now),
           }
         : {}),
       ...(status === "deleted" ? { deletedAt: { not: null } } : {}),
@@ -81,9 +82,9 @@ export default async function UsersPage({ searchParams }: Props) {
     where,
     select: {
       id: true, name: true, email: true, role: true, isVerified: true,
-      idVerifiedGrandfatheredAt: true, createdAt: true, suspendedAt: true,
-      suspendedUntil: true, deletedAt: true,
-      _count: { select: { items: true, reportsMade: true, idVerifications: true, sentRequests: true, receivedRequests: true } },
+      idVerifiedGrandfatheredAt: true, createdAt: true, suspensions: activeSuspension(now),
+      deletedAt: true,
+      _count: { select: { items: true, casesFiled: { where: REPORT }, idVerifications: true, sentTrades: { where: IN_TRADE_PHASE }, receivedTrades: { where: IN_TRADE_PHASE } } },
       idVerifications: {
         select: { status: true, submittedAt: true },
         orderBy: { submittedAt: "desc" },
@@ -189,8 +190,8 @@ export default async function UsersPage({ searchParams }: Props) {
                     </td>
                     <td style={{ padding: "14px", color: "#555", lineHeight: 1.7 }}>
                       <div>{user._count.items} listings</div>
-                      <div>{user._count.reportsMade} reports filed</div>
-                      <div>{user._count.sentRequests + user._count.receivedRequests} trade requests</div>
+                      <div>{user._count.casesFiled} reports filed</div>
+                      <div>{user._count.sentTrades + user._count.receivedTrades} trade requests</div>
                     </td>
                     <td style={{ padding: "14px" }}>
                       {user.deletedAt ? (

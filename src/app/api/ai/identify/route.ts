@@ -14,7 +14,7 @@ if (!process.env.ANTHROPIC_API_KEY) {
 
 const anthropic = new Anthropic()
 
-const VALID_CATEGORIES = ["ELECTRONICS","CLOTHING","BAGS","BEAUTY","ACCESSORIES","FURNITURE","BOOKS","GAMING","SPORTS","BIKES","TOYS","TOOLS","MUSIC","ART","COLLECTIBLES","PETS","PLANTS","FOOD","SERVICES","OTHER"]
+const VALID_CATEGORIES = ["ELECTRONICS","CLOTHING","BAGS","BEAUTY","ACCESSORIES","FURNITURE","BOOKS","GAMING","SPORTS","BIKES","TOYS","TOOLS","MUSIC","ART","COLLECTIBLES","PETS","PLANTS","FOOD","OTHER"]
 const VALID_CONDITIONS  = ["NEW","LIKE_NEW","GOOD","FAIR","POOR"]
 
 export async function POST(req: NextRequest) {
@@ -52,7 +52,7 @@ export async function POST(req: NextRequest) {
           {
             type: "text",
             text: `Identify this item for a secondhand trade marketplace listing. Return ONLY valid JSON — no markdown, no code fences, no explanation:
-{"name":"<concise item name, max 6 words>","category":"<ELECTRONICS|CLOTHING|BAGS|BEAUTY|ACCESSORIES|FURNITURE|BOOKS|GAMING|SPORTS|BIKES|TOYS|TOOLS|MUSIC|ART|COLLECTIBLES|PETS|PLANTS|FOOD|SERVICES|OTHER>","condition":"<NEW|LIKE_NEW|GOOD|FAIR|POOR>","tags":["<tag1>","<tag2>","<tag3>"]}`,
+{"name":"<concise item name, max 6 words>","category":"<ELECTRONICS|CLOTHING|BAGS|BEAUTY|ACCESSORIES|FURNITURE|BOOKS|GAMING|SPORTS|BIKES|TOYS|TOOLS|MUSIC|ART|COLLECTIBLES|PETS|PLANTS|FOOD|OTHER>","condition":"<NEW|LIKE_NEW|GOOD|FAIR|POOR>","tags":["<tag1>","<tag2>","<tag3>"]}`,
           },
         ],
       }],
@@ -72,7 +72,26 @@ export async function POST(req: NextRequest) {
     // The exception stays server-side. It previously went back to the caller as
     // `_error: String(e)`, which hands out upstream status codes and API error
     // bodies to anyone who can provoke a failure.
-    console.error("[identify] AI call failed:", e instanceof Error ? e.message : "unknown error")
-    return NextResponse.json({ name: "", category: "OTHER", condition: "GOOD", tags: [] })
+    console.error(
+      "[identify] AI call failed:",
+      e instanceof Anthropic.APIError ? `status ${e.status}` : "",
+      e instanceof Error ? e.message : "unknown error",
+    )
+    // A 503, NOT a 200 with empty defaults (27 Sep 2026).
+    //
+    // The 200 was meant to keep the post wizard from dead-ending on an outage,
+    // and it did -- but it also made the outage invisible. When the Anthropic
+    // account ran out of credit, every photo came back "OTHER, GOOD, no name"
+    // with a success status, and nobody could tell identification had stopped.
+    //
+    // The wizard does not need the 200 to keep going: the phone treats any
+    // thrown identify call exactly like an empty name (detect/fail, the same
+    // "Tell us what it is" form), and the admin web wizard simply skips the
+    // prefill. So the user sees nothing new, and the failure is now a status
+    // code that logs, monitoring and a curl can all see.
+    return NextResponse.json(
+      { error: "Photo identification is unavailable right now", code: "AI_UNAVAILABLE" },
+      { status: 503 },
+    )
   }
 }

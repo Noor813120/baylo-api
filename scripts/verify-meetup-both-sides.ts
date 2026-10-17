@@ -70,6 +70,7 @@ function head(s: string) {
   console.log(`\n── ${s} ${"─".repeat(Math.max(0, 66 - s.length))}`)
 }
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- untyped JSON from the wire
 type Json = Record<string, any>
 
 async function get(path: string, token: string): Promise<{ status: number; json: Json }> {
@@ -94,7 +95,7 @@ async function mkUser(tag: string) {
 async function mkItem(userId: string, tag: string) {
   return prisma.item.create({
     data: {
-      title: `${P}${tag}`, description: "fixture", images: "[]", category: "OTHER", condition: "GOOD",
+      title: `${P}${tag}`, description: "fixture", category: "OTHER", condition: "GOOD",
       valueLeaves: 100, suggestedLeaves: 100, status: "AVAILABLE", userId,
     },
     select: { id: true },
@@ -114,7 +115,7 @@ async function cleanup() {
   const ids = users.map((u) => u.id)
   if (ids.length) {
     await prisma.notification.deleteMany({ where: { userId: { in: ids } } })
-    await prisma.tradeRequest.deleteMany({ where: { OR: [{ senderId: { in: ids } }, { receiverId: { in: ids } }] } })
+    await prisma.trade.deleteMany({ where: { OR: [{ senderId: { in: ids } }, { receiverId: { in: ids } }] } })
     await prisma.itemSafeZone.deleteMany({ where: { item: { userId: { in: ids } } } })
     await prisma.item.deleteMany({ where: { userId: { in: ids } } })
     await prisma.user.deleteMany({ where: { id: { in: ids } } })
@@ -185,8 +186,9 @@ async function main() {
   const requested = await mkItem(receiver.id, "requested")
   const hubA = await mkHub("hubA")
   const hubB = await mkHub("hubB")
-  const trade = await prisma.tradeRequest.create({
+  const trade = await prisma.trade.create({
     data: {
+      tradeCreatedAt: new Date(), // trade phase from the start (schema v2 CHECK)
       status: "ACCEPTED",
       senderId: sender.id, receiverId: receiver.id,
       offeredItemId: offered.id, requestedItemId: requested.id,
@@ -266,7 +268,12 @@ async function main() {
   // ── 4 ──
   head("4  the SENDER counters; both read the counter, agreement cleared")
   const at2 = new Date(at.getTime() + 60 * 60 * 1000)
-  const counter = await post(`/api/v1/trades/${trade.id}/meetup`, sender.token, { hubId: hubB.id, at: at2.toISOString() })
+  // A counter names the plan it replaces (8 Oct 2026); verify-hub-suggestion
+  // covers what happens without it.
+  const counter = await post(`/api/v1/trades/${trade.id}/meetup`, sender.token, {
+    hubId: hubB.id, at: at2.toISOString(),
+    replaces: { hubId: hubA.id, at: at.toISOString(), proposedBy: "receiver" },
+  })
   check("counter accepted (200)", counter.status === 200, counter)
   const s4 = await listRow(sender.token, trade.id)
   const r4 = await listRow(receiver.token, trade.id)
@@ -300,19 +307,25 @@ async function main() {
   )
 
   // ── 6 ──
-  head("6  the ONE legitimate one-sided blindness: a hidden trade is not listed")
-  await prisma.tradeRequest.update({ where: { id: trade.id }, data: { hiddenBySender: true } })
+  // Per-party hiding was the one legitimate one-sided blindness. It was
+  // dropped in schema v2 (20261004000002_schema_v2_drop_trade_hidden), so
+  // there is no longer any state in which one side lists a trade and the
+  // other does not.
+  head("6  no one-sided blindness: hiding is retired (410), both sides list it")
+  const hide6 = await fetch(`${BASE}/api/trades/${trade.id}`, {
+    method: "PATCH",
+    headers: { authorization: `Bearer ${sender.token}`, "content-type": "application/json" },
+    body: JSON.stringify({ action: "hide" }),
+  })
+  check("PATCH {action: hide} answers 410", hide6.status === 410, hide6.status)
   const s6 = await listRow(sender.token, trade.id)
   const r6 = await listRow(receiver.token, trade.id)
-  check("sender, who hid it, does not list it", s6 === null, s6)
+  check("sender still lists it, plan intact", !!s6?.meetup?.agreedAt, s6)
   check("receiver still lists it, plan intact", !!r6?.meetup?.agreedAt, r6)
-  const ms6 = await get(`/api/v1/trades/${trade.id}/meetup`, sender.token)
-  check("…but GET …/meetup still answers the sender (hiding is a list filter)", ms6.status === 200 && !!ms6.json.data?.plan, ms6)
-  await prisma.tradeRequest.update({ where: { id: trade.id }, data: { hiddenBySender: false } })
 
   // ── 7 ──
   head("7  a proposal bumps updatedAt (the list's sort key)")
-  const now = await prisma.tradeRequest.findUnique({ where: { id: trade.id }, select: { updatedAt: true } })
+  const now = await prisma.trade.findUnique({ where: { id: trade.id }, select: { updatedAt: true } })
   check("updatedAt moved past the fixture's", !!now && now.updatedAt.getTime() > trade.updatedAt.getTime(), [trade.updatedAt, now?.updatedAt])
 
   // ── 9 ──

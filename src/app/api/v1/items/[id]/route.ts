@@ -3,9 +3,10 @@ import { bracketOf, valueNeedsPremium, valueNeedsVip } from "@/lib/brackets"
 import { valueCap } from "@/lib/trade-rules"
 import { valueRejectionSentence } from "@/lib/value-rejection"
 import { ownerAppealState } from "@/lib/appeals"
-import { isPremium, isVip } from "@/lib/premium"
+import { isPremium, isVip, premiumUntil, vipUntil, SUBSCRIPTION_SELECT } from "@/lib/premium"
 import { z } from "zod"
 import { resolveSession } from "@/lib/api-auth"
+import { resolveListingOwners } from "@/lib/listing-owner"
 import prisma from "@/lib/prisma"
 import { preciseAccessItemIds } from "@/lib/item-visibility"
 import { visibleItemWhere } from "@/lib/blocking"
@@ -14,6 +15,7 @@ import { expireStaleOffers } from "@/lib/offers"
 import { ok, unauthenticated, notFound } from "@/lib/v1/envelope"
 import { parseQuery } from "@/lib/v1/query"
 import { V1_ITEM_SELECT, V1_ITEM_OWNER_SELECT, V1_ITEM_SAFEZONE_SELECT, v1ItemStatsSelect, v1Item, type V1ItemRow } from "@/lib/v1/item"
+import { ITEM_IMAGES, leadHash, toImageUrls, type ImagesLike } from "@/lib/item-images"
 
 export const dynamic = "force-dynamic"
 
@@ -122,6 +124,13 @@ export async function GET(
   const parsed = parseQuery(req, querySchema)
   if (!parsed.ok) return parsed.response
 
+  // Who counts as this listing's owner: the person, plus the shop they are
+  // acting as (X-Baylo-Org, ACTIVE membership). See @/lib/listing-owner. A
+  // dead shop context falls back to the person -- the public view, which
+  // grants nothing -- rather than failing the screen.
+  const owners = await resolveListingOwners(viewerId, req.headers)
+  const ownerIds = owners.ok ? owners.ownerIds : [viewerId]
+
   // ── 1 ──
   //
   // findFirst with visibleItemWhere(), not findUnique by id. The block and the
@@ -136,12 +145,11 @@ export async function GET(
   // one outcome worse than a takedown: a tile on their own shelf that answered
   // "Item not found" when tapped, with nothing anywhere saying why. An owner
   // reads their own listing in every state, and the `review` block below is
-  // where the state is explained.
+  // where the state is explained. Acting as a shop, that includes the shop's.
   const item = await prisma.item.findFirst({
-    where: { id, OR: [{ userId: viewerId }, visibleItemWhere(viewerId)] },
+    where: { id, OR: [{ userId: { in: ownerIds } }, visibleItemWhere(viewerId)] },
     select: {
       ...V1_ITEM_SELECT,
-      imageHash: true,
       updatedAt: true,
       user: { select: V1_ITEM_OWNER_SELECT },
       ...v1ItemStatsSelect(viewerId),
@@ -172,12 +180,12 @@ export async function GET(
   if (!item || item.status === "REMOVED") return notFound("Item not found")
   if (
     (item.status === "PENDING_REVIEW" || item.status === "VALUE_REJECTED") &&
-    item.userId !== viewerId
+    !ownerIds.includes(item.userId)
   ) {
     return notFound("Item not found")
   }
 
-  const isOwner = item.userId === viewerId
+  const isOwner = ownerIds.includes(item.userId)
 
   // `viewer.existingOfferId` below is what puts the app on §5.2's pending-offer
   // screen instead of the composer, so a lapsed offer has to be EXPIRED before
@@ -191,8 +199,8 @@ export async function GET(
     preciseAccessItemIds(viewerId, [item.id]),
     isOwner
       ? Promise.resolve(null)
-      : prisma.offer.findFirst({
-          where: { postId: item.id, senderId: viewerId, status: "PENDING" },
+      : prisma.trade.findFirst({
+          where: { requestedItemId: item.id, senderId: viewerId, offerStatus: "PENDING" },
           select: { id: true },
           orderBy: { createdAt: "desc" },
         }),
@@ -200,34 +208,29 @@ export async function GET(
       ? Promise.resolve([])
       : prisma.item.findMany({
           where: { userId: viewerId, status: "AVAILABLE", moderationHiddenAt: null },
-          select: { id: true, title: true, images: true },
+          select: { id: true, title: true, images: ITEM_IMAGES },
           orderBy: [{ createdAt: "desc" }, { id: "desc" }],
           take: 50,
         }),
     prisma.user.findUnique({
       where: { id: viewerId },
-      select: { leaves: true, premiumUntil: true, vipUntil: true },
+      select: { leaves: true, subscriptions: SUBSCRIPTION_SELECT },
     }),
     // The same function the contract gates enforce with, so the badge on this
     // screen can never promise something the server would then refuse.
     loadTrustTiers(prisma, [{ id: item.userId, rating: item.user.rating }]),
   ])
 
-  const shaped = v1Item(item as unknown as V1ItemRow, viewerId, access, tiers)
+  // resolvePickup() recognises the owner by `item.userId === viewerId`, so a
+  // shop member managing the shop's listing is passed as the shop -- they see
+  // the pickup point they posted, precisely, as any owner does.
+  const shaped = v1Item(item as unknown as V1ItemRow, isOwner ? item.userId : viewerId, access, tiers)
 
-  const firstImage = (raw: string): string | null => {
-    try {
-      const parsedImages: unknown = JSON.parse(raw)
-      return Array.isArray(parsedImages) && typeof parsedImages[0] === "string"
-        ? parsedImages[0]
-        : null
-    } catch {
-      return null
-    }
-  }
+  const firstImage = (raw: ImagesLike): string | null => toImageUrls(raw)[0] ?? null
 
   return ok({
-    item: { ...shaped, imageHash: item.imageHash, updatedAt: item.updatedAt },
+    // imageHash: the cover photo's hash, rebuilt from ItemImage (schema v2).
+    item: { ...shaped, imageHash: leadHash(item.images), updatedAt: item.updatedAt },
     // What happened to this listing, for its owner. NULL for everyone else
     // and for a listing nothing has happened to. The client draws the review
     // screen from this block alone -- both values, both brackets, the cap it
@@ -262,12 +265,12 @@ export async function GET(
       // whatever bracket it is in, and a padlock on your own item would read as
       // a claim about you.
       offerLock:
-        !isOwner && valueNeedsVip(item.valueLeaves) && !isVip(viewerRow?.vipUntil)
+        !isOwner && valueNeedsVip(item.valueLeaves) && !isVip(vipUntil(viewerRow?.subscriptions))
           ? ("vip" as const)
           : !isOwner &&
               valueNeedsPremium(item.valueLeaves) &&
-              !isPremium(viewerRow?.premiumUntil) &&
-              !isVip(viewerRow?.vipUntil)
+              !isPremium(premiumUntil(viewerRow?.subscriptions)) &&
+              !isVip(vipUntil(viewerRow?.subscriptions))
             ? ("premium" as const)
             : null,
       leaves: viewerRow?.leaves ?? 0,

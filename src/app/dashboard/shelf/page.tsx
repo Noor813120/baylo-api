@@ -1,10 +1,12 @@
 import { auth } from "@/../auth"
 import { redirect } from "next/navigation"
 import prisma from "@/lib/prisma"
+import { asTrades } from "@/lib/trade-row"
 import { computeImpactData } from "@/lib/impact-constants"
 import ShelfClient from "./ShelfClient"
 import type { ShelfItem } from "./ShelfClient"
 import { describeMessage } from "@/lib/chat-helpers"
+import { ITEM_IMAGES, toImageUrls, type ImagesLike } from "@/lib/item-images"
 
 export const dynamic = "force-dynamic"
 export const revalidate = 0
@@ -18,7 +20,6 @@ const CATEGORY_HASHTAG: Record<string, string> = {
   TOYS:        "#KidsToys",
   TOOLS:       "#ToolsDIY",
   FOOD:        "#Food",
-  SERVICES:    "#Services",
   OTHER:       "#Miscellaneous",
 }
 
@@ -32,13 +33,8 @@ const NOTIF_ICON: Record<string, string> = {
   NEW_REVIEW:      "star",
 }
 
-function firstImage(raw: string): string | null {
-  try {
-    const imgs = JSON.parse(raw)
-    return Array.isArray(imgs) && imgs[0] ? (imgs[0] as string) : null
-  } catch {
-    return null
-  }
+function firstImage(raw: ImagesLike): string | null {
+  return toImageUrls(raw)[0] ?? null
 }
 
 function timeAgo(date: Date): string {
@@ -73,6 +69,7 @@ export default async function ShelfPage() {
     }),
     prisma.item.findMany({
       where: { userId: myId, status: { in: ["AVAILABLE", "OWNED", "TRADED"] } },
+      include: { images: ITEM_IMAGES },
       orderBy: { createdAt: "desc" },
     }),
     prisma.message.findMany({
@@ -90,14 +87,14 @@ export default async function ShelfPage() {
     prisma.follow.count({
       where: { followeeId: myId, status: "PENDING" },
     }),
-    prisma.tradeRequest.count({
+    prisma.trade.count({
       where: {
         OR: [{ senderId: myId }, { receiverId: myId }],
         status: "COMPLETED",
         updatedAt: { gte: weekAgo },
       },
     }),
-    prisma.tradeRequest.findMany({
+    prisma.trade.findMany({
       where: {
         OR: [{ senderId: myId }, { receiverId: myId }],
         status: "COMPLETED",
@@ -108,7 +105,7 @@ export default async function ShelfPage() {
         offeredItem:   { select: { category: true } },
         requestedItem: { select: { category: true } },
       },
-    }),
+    }).then(asTrades),
     prisma.item.groupBy({
       by: ["category"],
       where: { createdAt: { gte: weekAgo }, status: { not: "REMOVED" } },
@@ -125,12 +122,12 @@ export default async function ShelfPage() {
 
   const [offeredCounts, requestedCounts] = itemIds.length > 0
     ? await Promise.all([
-        prisma.tradeRequest.groupBy({
+        prisma.trade.groupBy({
           by: ["offeredItemId"],
           where: { offeredItemId: { in: itemIds }, status: "COMPLETED" },
           _count: { id: true },
         }),
-        prisma.tradeRequest.groupBy({
+        prisma.trade.groupBy({
           by: ["requestedItemId"],
           where: { requestedItemId: { in: itemIds }, status: "COMPLETED" },
           _count: { id: true },

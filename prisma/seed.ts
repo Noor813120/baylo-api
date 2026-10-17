@@ -82,11 +82,12 @@
 // the readable message below instead.
 import "dotenv/config"
 
-import { PrismaClient } from "../src/generated/prisma/client"
+import { PrismaClient } from "@/generated/prisma/client"
 import { PrismaPg } from "@prisma/adapter-pg"
 import bcrypt from "bcryptjs"
 import { SAFE_ZONE_HUB_SEED } from "../scripts/safezone-hub-data"
 import { requireScratchSchema, targetSchema } from "../scripts/lib/live-guard"
+import { seedCategories } from "./category-seed"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Client
@@ -503,8 +504,6 @@ async function seedUsers(passwordHash: string) {
       // id_verification migration stamped on every account that existed then.
       idVerifiedGrandfatheredAt: T0,
       deletedAt: null,
-      suspendedAt: null,
-      suspendedUntil: null,
     }
     await prisma.user.upsert({
       where: { id: u.id },
@@ -519,7 +518,7 @@ async function seedItems() {
     const shared = {
       title: it.title,
       description: it.description,
-      images: JSON.stringify([it.image]),
+      images: { create: [{ position: 0, url: it.image }] },
       category: it.category as never,
       condition: it.condition as never,
       valueLeaves: it.valueLeaves,
@@ -561,12 +560,13 @@ async function seedTrades() {
       requestedItemId: t.requestedItemId,
       offeredLeaves: t.offeredLeaves,
       safeZoneHubId: t.safeZoneHubId,
-      hiddenBySender: false,
-      hiddenByReceiver: false,
+      // Seeded as already settled, so completedAt is the settlement moment
+      // (the v2 backfill gives these rows the same value).
+      completedAt: t.settledAt,
     }
-    await prisma.tradeRequest.upsert({
+    await prisma.trade.upsert({
       where: { id: t.id },
-      create: { id: t.id, createdAt: t.settledAt, ...shared },
+      create: { id: t.id, createdAt: t.settledAt, tradeCreatedAt: t.settledAt, ...shared },
       update: shared,
     })
   }
@@ -574,16 +574,18 @@ async function seedTrades() {
 
 async function seedOffer() {
   const o = PENDING_OFFER
+  // A deal in its offer phase (schema v2: one Trade row per deal, `status`
+  // NULL until it is accepted into a trade).
   const shared = {
-    postId: o.postId,
+    requestedItemId: o.postId,
     senderId: o.senderId,
     receiverId: o.receiverId,
-    offeredItems: JSON.stringify(o.offeredItems),
+    offeredItemId: o.offeredItems[0].id,
     offeredLeaves: o.offeredLeaves,
     message: o.message,
-    status: "PENDING" as never,
+    offerStatus: "PENDING" as never,
   }
-  await prisma.offer.upsert({
+  await prisma.trade.upsert({
     where: { id: o.id },
     create: { id: o.id, createdAt: o.createdAt, ...shared },
     update: shared,
@@ -717,6 +719,9 @@ async function main() {
   console.log(`\n  seeding \`${db}\`\n`)
 
   const passwordHash = await bcrypt.hash(SEED_PASSWORD, BCRYPT_ROUNDS)
+
+  // Before any listing: Item.categoryId is a foreign key to these rows.
+  console.log(`  categories ${await seedCategories(prisma)} (reference data)`)
 
   const hubs = await seedHubs()
   console.log(`  hubs      ${hubs.seeded} Safe-Zone Hubs${hubs.held ? ` (${hubs.held} held back: no verified coordinate)` : ""}`)

@@ -6,6 +6,9 @@ import { randomInt } from "crypto"
 import { sendSwapConfirmationCode } from "@/lib/mailer"
 import { MAX_CODE_ATTEMPTS } from "@/lib/swap-code"
 import { sealCode } from "@/lib/swap-code-seal"
+import {
+  isShopMemberPair, legacyParticipantRefusal, resolveTradeParticipant, shopMemberSelfTradeRefusal,
+} from "@/lib/trade-participant"
 
 /**
  * A confirmation code, from the CSPRNG.
@@ -24,7 +27,7 @@ function randomDigits(n: number): string {
 }
 
 export async function POST(
-  _req: NextRequest,
+  req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
   try {
@@ -32,9 +35,8 @@ export async function POST(
     if (!session?.user?.id) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
 
     const { id: tradeId } = await params
-    const myId = session.user.id
 
-    const trade = await prisma.tradeRequest.findUnique({
+    const found = await prisma.trade.findUnique({
       where: { id: tradeId },
       include: {
         sender:        { select: { id: true, name: true, email: true } },
@@ -44,10 +46,21 @@ export async function POST(
       },
     })
 
-    if (!trade) return NextResponse.json({ error: "Trade not found" }, { status: 404 })
-    if (trade.senderId !== myId && trade.receiverId !== myId) {
-      return NextResponse.json({ error: "Forbidden" }, { status: 403 })
+    // A deal still in its offer phase is not a trade yet (schema v2).
+    if (!found || found.status === null || found.offeredItem === null) {
+      return NextResponse.json({ error: "Trade not found" }, { status: 404 })
     }
+    const trade = { ...found, status: found.status, offeredItem: found.offeredItem }
+    // Either side: the person, or the shop they are acting as. Codes are
+    // generated for both sides at once, so any member may start them for a shop.
+    // See @/lib/trade-participant.
+    const who = await resolveTradeParticipant(session.user.id, req.headers, trade)
+    if (!who.ok) return legacyParticipantRefusal(who)
+    const myId = who.participantId
+    // A shop and one of its own members, at settlement too: a person invited
+    // after the trade was accepted can read BOTH swap codes and would settle
+    // with themselves. Cancelling stays open. See @/lib/trade-participant.
+    if (await isShopMemberPair(prisma, trade.senderId, trade.receiverId)) return shopMemberSelfTradeRefusal()
     if (trade.status !== "ACCEPTED" && trade.status !== "CONFIRMING") {
       return NextResponse.json({ error: "Trade is not ready for confirmation" }, { status: 400 })
     }
@@ -59,7 +72,7 @@ export async function POST(
     // Idempotent only while both codes are still live AND still guessable. A
     // pair that has been burned by MAX_CODE_ATTEMPTS must fall through to
     // regeneration below, otherwise a locked-out trade could never be restarted.
-    const existing = await prisma.swapConfirmationCode.findMany({
+    const existing = await prisma.swapCode.findMany({
       where: {
         tradeId,
         expiresAt: { gt: now },
@@ -100,17 +113,17 @@ export async function POST(
       // reissue the previous seal has to be replaced or overwritten with null,
       // never left behind -- a stale seal beside a fresh hash is the one state
       // that would show somebody a code their partner cannot accept.
-      prisma.swapConfirmationCode.upsert({
+      prisma.swapCode.upsert({
         where:  { tradeId_userId: { tradeId, userId: trade.senderId } },
         create: { tradeId, userId: trade.senderId,   codeHash: senderHash,   codeSealed: senderSealed,   used: false, attempts: 0, expiresAt },
         update: { codeHash: senderHash,   codeSealed: senderSealed,   used: false, attempts: 0, expiresAt },
       }),
-      prisma.swapConfirmationCode.upsert({
+      prisma.swapCode.upsert({
         where:  { tradeId_userId: { tradeId, userId: trade.receiverId } },
         create: { tradeId, userId: trade.receiverId, codeHash: receiverHash, codeSealed: receiverSealed, used: false, attempts: 0, expiresAt },
         update: { codeHash: receiverHash, codeSealed: receiverSealed, used: false, attempts: 0, expiresAt },
       }),
-      prisma.tradeRequest.update({
+      prisma.trade.update({
         where: { id: tradeId },
         data:  { status: "CONFIRMING" },
       }),

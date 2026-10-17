@@ -1,6 +1,8 @@
 import { auth } from "@/../auth"
 import { redirect } from "next/navigation"
 import prisma from "@/lib/prisma"
+import { asTrades } from "@/lib/trade-row"
+import { ITEM_IMAGES, imagesJson, leadHash } from "@/lib/item-images"
 import TradeplaceClient from "./TradeplaceClient"
 import type { SerializedItem } from "./TradeplaceClient"
 import { preciseAccessItemIds, resolvePickup } from "@/lib/item-visibility"
@@ -29,7 +31,7 @@ const NOTIF_ICON: Record<string, string> = {
 const CAT_LABELS: Record<string, string> = {
   ELECTRONICS: "Electronics", CLOTHING: "Fashion", FURNITURE: "Home & Garden",
   BOOKS: "Books & Media", SPORTS: "Sports", TOYS: "Kids & Toys",
-  TOOLS: "Tools & DIY", FOOD: "Food", SERVICES: "Services", OTHER: "Other",
+  TOOLS: "Tools & DIY", FOOD: "Food", OTHER: "Other",
 }
 
 function topUserFromPairs(pairs: Array<{ senderId: string; receiverId: string }>) {
@@ -58,7 +60,7 @@ export default async function TradeplacePage({
          recentTradePairs, trendingCatRaw, tickerTradesRaw] = await Promise.all([
     prisma.item.findMany({
       where: { status: "AVAILABLE" },
-      include: { user: { select: { id: true, name: true, avatar: true, rating: true, totalTrades: true, lifetimeLeaves: true } } },
+      include: { images: ITEM_IMAGES, user: { select: { id: true, name: true, avatar: true, rating: true, totalTrades: true, lifetimeLeaves: true } } },
       orderBy: { createdAt: "desc" },
     }),
     prisma.user.findUnique({
@@ -80,7 +82,7 @@ export default async function TradeplacePage({
     prisma.follow.count({
       where: { followeeId: session.user.id, status: "PENDING" },
     }),
-    prisma.tradeRequest.count({
+    prisma.trade.count({
       where: {
         OR: [{ senderId: session.user.id }, { receiverId: session.user.id }],
         status: "COMPLETED",
@@ -88,7 +90,7 @@ export default async function TradeplacePage({
       },
     }),
     // Trader of the week: completed trade pairs in last 7 days
-    prisma.tradeRequest.findMany({
+    prisma.trade.findMany({
       where: { status: "COMPLETED", updatedAt: { gte: weekAgo } },
       select: { senderId: true, receiverId: true },
     }),
@@ -101,7 +103,7 @@ export default async function TradeplacePage({
       take: 1,
     }),
     // Ticker: most recent completed trades with item titles
-    prisma.tradeRequest.findMany({
+    prisma.trade.findMany({
       where: { status: "COMPLETED" },
       include: {
         sender: { select: { name: true } },
@@ -110,20 +112,20 @@ export default async function TradeplacePage({
       },
       orderBy: { updatedAt: "desc" },
       take: 10,
-    }),
+    }).then(asTrades),
   ])
 
   if (!me) redirect("/auth/login")
 
   const itemIds = rawItems.map((i) => i.id)
   const completedTradeItems = itemIds.length > 0
-    ? await prisma.tradeRequest.findMany({
+    ? await prisma.trade.findMany({
         where: {
           status: "COMPLETED",
           OR: [{ offeredItemId: { in: itemIds } }, { requestedItemId: { in: itemIds } }],
         },
         select: { offeredItemId: true, requestedItemId: true },
-      })
+      }).then(asTrades)
     : []
 
   const tradeCountMap = new Map<string, number>()
@@ -140,13 +142,14 @@ export default async function TradeplacePage({
     id: item.id,
     title: item.title,
     description: item.description,
-    images: item.images,
+    // The client component still takes the legacy JSON string and lead hash.
+    images: imagesJson(item.images),
     category: item.category as string,
     condition: item.condition as string,
     valueLeaves: item.valueLeaves,
     wanted: item.wantedItems,
     pickup: resolvePickup(item, session.user!.id, pickupAccess),
-    imageHash: item.imageHash,
+    imageHash: leadHash(item.images),
     userId: item.userId,
     tradeCount: tradeCountMap.get(item.id) ?? 0,
     user: {
@@ -189,7 +192,7 @@ export default async function TradeplacePage({
   {
     let topEntry = topUserFromPairs(recentTradePairs)
     if (!topEntry) {
-      const allTimePairs = await prisma.tradeRequest.findMany({
+      const allTimePairs = await prisma.trade.findMany({
         where: { status: "COMPLETED" },
         select: { senderId: true, receiverId: true },
       })

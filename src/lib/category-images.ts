@@ -19,6 +19,5 @@ export const CATEGORY_IMAGES: Record<string, string> = {
   PETS:         "https://images.unsplash.com/photo-1601758124510-52d02ddb7cbd?w=400&q=75",
   PLANTS:       "https://images.unsplash.com/photo-1466692476868-aef1dfb1e735?w=400&q=75",
   FOOD:         "https://images.unsplash.com/photo-1504674900247-0877df9cc836?w=400&q=75",
-  SERVICES:     "https://images.unsplash.com/photo-1521737604893-d14cc237f11d?w=400&q=75",
   OTHER:        "https://images.unsplash.com/photo-1441986300917-64674bd600d8?w=400&q=75",
 }

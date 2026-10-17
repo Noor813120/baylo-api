@@ -1,5 +1,7 @@
 import prisma from "@/lib/prisma"
+import { asTrades } from "@/lib/trade-row"
 import RegisterClient, { type SwapDisplay } from "./RegisterClient"
+import { ITEM_IMAGES, toImageUrls, type ImagesLike } from "@/lib/item-images"
 
 function formatRelativeTime(date: Date): string {
   const diffMs = Date.now() - date.getTime()
@@ -12,19 +14,14 @@ function formatRelativeTime(date: Date): string {
   return `${diffDays}d ago`
 }
 
-function parseFirstImage(images: string): string | null {
-  try {
-    const arr = JSON.parse(images)
-    return Array.isArray(arr) && arr[0] ? (arr[0] as string) : null
-  } catch {
-    return null
-  }
+function parseFirstImage(raw: ImagesLike): string | null {
+  return toImageUrls(raw)[0] ?? null
 }
 
 export default async function RegisterPage() {
   const googleEnabled = Boolean(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET)
   const [rawSwaps, userCount, recentUsers] = await Promise.all([
-    prisma.tradeRequest.findMany({
+    prisma.trade.findMany({
       where: { status: "COMPLETED" },
       orderBy: { updatedAt: "desc" },
       take: 3,
@@ -33,10 +30,10 @@ export default async function RegisterPage() {
         updatedAt: true,
         sender: { select: { name: true } },
         receiver: { select: { name: true } },
-        offeredItem: { select: { title: true, images: true } },
-        requestedItem: { select: { title: true, images: true } },
+        offeredItem: { select: { title: true, images: ITEM_IMAGES } },
+        requestedItem: { select: { title: true, images: ITEM_IMAGES } },
       },
-    }),
+    }).then(asTrades),
     prisma.user.count(),
     prisma.user.findMany({
       orderBy: { createdAt: "desc" },

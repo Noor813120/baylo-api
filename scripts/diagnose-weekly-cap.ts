@@ -28,9 +28,8 @@ async function cleanup() {
   const users = await prisma.user.findMany({ where: { email: { startsWith: P } }, select: { id: true } })
   const ids = users.map((u) => u.id)
   if (!ids.length) return
-  await prisma.taskCompletion.deleteMany({ where: { userId: { in: ids } } })
   await prisma.leafTransaction.deleteMany({ where: { userId: { in: ids } } })
-  await prisma.tradeRequest.deleteMany({ where: { OR: [{ senderId: { in: ids } }, { receiverId: { in: ids } }] } })
+  await prisma.trade.deleteMany({ where: { OR: [{ senderId: { in: ids } }, { receiverId: { in: ids } }] } })
   await prisma.item.deleteMany({ where: { userId: { in: ids } } })
   await prisma.user.deleteMany({ where: { id: { in: ids } } })
 }
@@ -40,7 +39,7 @@ async function mkUser(tag: string) {
 }
 async function mkItem(userId: string, tag: string) {
   return prisma.item.create({
-    data: { title: P + tag, description: "d", images: "[]", category: "BOOKS", condition: "GOOD", userId },
+    data: { title: P + tag, description: "d", category: "BOOKS", condition: "GOOD", userId },
   })
 }
 
@@ -51,22 +50,23 @@ async function buildHistory(owner: { id: string }, tag: string, agesInDays: numb
     const i1 = await mkItem(owner.id, `${tag}o${i}`)
     const i2 = await mkItem(partner.id, `${tag}p${i}i`)
     const at = new Date(Date.now() - agesInDays[i] * DAY)
-    const t = await prisma.tradeRequest.create({
+    const t = await prisma.trade.create({
       data: {
+        tradeCreatedAt: new Date(), // trade phase from the start (schema v2 CHECK)
         senderId: owner.id, receiverId: partner.id,
         offeredItemId: i1.id, requestedItemId: i2.id, status: "COMPLETED",
       },
     })
     // createdAt/updatedAt are managed by Prisma, so backdate them directly.
-    await prisma.$executeRaw`UPDATE "TradeRequest" SET "createdAt" = ${at}, "updatedAt" = ${at} WHERE "id" = ${t.id}`
+    await prisma.$executeRaw`UPDATE "Trade" SET "createdAt" = ${at}, "tradeCreatedAt" = ${at}, "updatedAt" = ${at} WHERE "id" = ${t.id}`
   }
 }
 
 async function report(userId: string, label: string) {
   const u = await prisma.user.findUnique({ where: { id: userId } })
-  const paid = await prisma.taskCompletion.count({ where: { userId, leaves: { gt: 0 } } })
-  const zero = await prisma.taskCompletion.count({ where: { userId, leaves: 0 } })
-  const total = await prisma.taskCompletion.count({ where: { userId } })
+  const paid = await prisma.leafTransaction.count({ where: { userId, task: { not: null }, amount: { gt: 0 } } })
+  const zero = await prisma.leafTransaction.count({ where: { userId, task: { not: null }, amount: 0 } })
+  const total = await prisma.leafTransaction.count({ where: { userId, task: { not: null } } })
   const rows = await prisma.leafTransaction.findMany({
     where: { userId, type: "TASK_REWARD" }, orderBy: { eventAt: "asc" },
     select: { amount: true, eventAt: true },

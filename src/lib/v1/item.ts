@@ -1,5 +1,7 @@
 import { resolvePickup, type PublicPickup } from "@/lib/item-visibility"
 import { getLeafRank } from "@/lib/task-constants"
+import { ITEM_IMAGES, imageUrls, type ImageRow, toImageUrls, type ImagesLike } from "@/lib/item-images"
+import { WANTED_CATEGORIES } from "@/lib/wanted-categories"
 import type { TrustTier } from "@/lib/reputation"
 import {
   SAFE_ZONE_HUB_SELECT,
@@ -8,6 +10,7 @@ import {
   type V1Hub,
 } from "@/lib/safe-zones"
 import { categoryLabel, conditionLabel } from "./taxonomy"
+import { ORG_PUBLIC_SELECT, orgBadge, type OrgBadge, type OrgPublicRow } from "@/lib/organizations"
 
 /**
  * The one Item shape, rendered by /home, /browse, /items/[id] and both profile
@@ -39,7 +42,8 @@ export const V1_ITEM_SELECT = {
   id: true,
   title: true,
   description: true,
-  images: true,
+  // Ordered ItemImage rows (schema v2); emitted as the same `images: string[]`.
+  images: ITEM_IMAGES,
   category: true,
   condition: true,
   valueLeaves: true,
@@ -53,10 +57,20 @@ export const V1_ITEM_SELECT = {
   moderationHiddenAt: true,
   valueRejectionReason: true,
   wantedItems: true, // read only to produce `wanted`; never emitted under this name
-  imageHash: true,
   createdAt: true,
   updatedAt: true,
   userId: true,
+  // The perishable block. Four columns that are null/false on every listing
+  // made before 23 Sep 2026 and on every standard one since, so a client that
+  // does not know about them reads exactly what it read before.
+  isPerishable: true,
+  quantity: true,
+  quantityUnit: true,
+  tradeWithinHours: true,
+  // The matcher's input, and the owner's stated wants -- which the detail
+  // screen renders as "looking for" chips. ItemWantedCategory rows since
+  // schema v2; none on every pre-column row.
+  wantedCategories: WANTED_CATEGORIES,
   // Needed by resolvePickup(). The route resolves them; they never reach a body.
   pickupLat: true,
   pickupLng: true,
@@ -76,15 +90,37 @@ export const V1_ITEM_OWNER_SELECT = {
   rating: true,
   totalTrades: true,
   lifetimeLeaves: true,
+  /**
+   * The organisation this owner IS, when the row is an org's backing account.
+   * NULL on every human owner, which is almost every row.
+   *
+   * A NESTED SELECT AND NOT A SECOND QUERY, because the feed renders a "Verified
+   * org" badge on the card and a per-card lookup is the N+1 this whole module
+   * exists to avoid. It is a left join on a unique index, so the cost on a page
+   * of twenty human owners is twenty index probes that find nothing.
+   */
+  organization: { select: ORG_PUBLIC_SELECT },
 } as const
 
 /**
  * The Safe-Zone hubs this listing is offered at.
  *
- * A SEPARATE, OPT-IN SELECT rather than part of V1_ITEM_SELECT. Every feed row
- * would otherwise carry a join it does not render: /home and /browse show a
- * card, and a card has no room for five meetup points. Detail screens spread
- * this in; lists do not, and the cost stays where the value is.
+ * A SEPARATE, OPT-IN SELECT rather than part of V1_ITEM_SELECT, so a route
+ * pays for the join only when it renders the hubs. Who spreads it in:
+ *
+ *   detail screens   the full list of meetup points
+ *   /browse          since 1 Oct 2026, for the card's place line ("New ·
+ *                    Lapu-Lapu"): the client shows the first active hub's city
+ *   /home and others not loaded; they send `safeZones: null`, which the
+ *                    client reads as "not loaded", never as "none"
+ *
+ * The cost on a list is TWO extra statements per page, and never one per row
+ * (measured 1 Oct 2026: a 21-row /browse page went from 4 statements to 6).
+ * Prisma loads the relation for the whole page in two batched steps -- the
+ * ItemSafeZone links for all the page's item ids in one IN (...), then the
+ * SafeZoneHub rows they name in another -- whatever the page size. On live
+ * every hub-bearing listing has exactly one hub, so a page carries at most one
+ * small hub object per row.
  *
  * INACTIVE HUBS ARE INCLUDED. That is the whole point of the flag — a listing
  * offered at a hub that has since closed keeps saying so, and the client
@@ -184,6 +220,21 @@ export interface V1Owner {
    */
   trustTier: TrustTier | null
   featuredAchievement: { id: string; name: string; icon: string } | null
+  /**
+   * The organisation this owner IS, or null for a person.
+   *
+   * WHEN THIS IS NON-NULL, `trustTier` IS ALWAYS NULL, and that is enforced in
+   * v1Item() rather than left to the caller. The spec asks for the verified-org
+   * badge to REPLACE the trust-tier badge, and a wire shape that can carry both
+   * is one where some client eventually renders both -- a business with a
+   * "Rising Trader" rung under its checkmark, which is exactly the claim
+   * organisations are excluded from the ladder to avoid making.
+   *
+   * `org.verified` is NOT "an Organization row exists". A PENDING org is a real
+   * account that posts and trades; only VERIFIED earns the checkmark. See
+   * orgBadge().
+   */
+  org: OrgBadge | null
 }
 
 export interface V1Item {
@@ -214,6 +265,35 @@ export interface V1Item {
    */
   valueRejectionReason: string | null
   wanted: string | null
+  /**
+   * The perishable block, or null for a standard listing.
+   *
+   * ONE NULLABLE OBJECT rather than four loose nullable fields, because the
+   * four only mean anything together: a quantity with no window, or a window on
+   * a standard item, are states the write paths refuse, and a wire shape that
+   * can express them invites a client to render one.
+   *
+   * `expiresAt` is DERIVED here and not stored -- see the note on
+   * Item.tradeWithinHours. The client counts down against it; the server's
+   * lazy sweep is what actually moves the status.
+   */
+  perishable: {
+    quantity: number | null
+    quantityUnit: string | null
+    tradeWithinHours: number
+    expiresAt: Date
+    /** Already past its window but not yet swept. See expirePerishableItems(). */
+    expired: boolean
+  } | null
+  /**
+   * ALWAYS NULL since schema v2: Featured boosts were removed. Kept on the
+   * wire because shipped clients read it, and null is exactly what they
+   * already render as "not featured".
+   */
+  featuredUntil: null
+  /** The categories the owner will take in return. `[]` means none stated. */
+  lookingFor: string[]
+  lookingForLabels: string[]
   pickup: PublicPickup | null
   /**
    * The public meetup points this listing is offered at.
@@ -236,15 +316,8 @@ export interface V1Item {
  * `images` is stored as a JSON string. A malformed value yields an empty array
  * rather than throwing: one bad row should not take down a whole feed page.
  */
-function parseImages(raw: string | null | undefined): string[] {
-  if (!raw) return []
-  try {
-    const parsed: unknown = JSON.parse(raw)
-    if (!Array.isArray(parsed)) return []
-    return parsed.filter((u): u is string => typeof u === "string")
-  } catch {
-    return []
-  }
+export function parseImages(raw: ImagesLike): string[] {
+  return toImageUrls(raw)
 }
 
 /** The row shape v1Item() consumes — what V1_ITEM_SELECT plus the joins yield. */
@@ -252,7 +325,7 @@ export interface V1ItemRow {
   id: string
   title: string
   description: string
-  images: string
+  images: readonly ImageRow[]
   category: string
   condition: string
   valueLeaves: number | null
@@ -263,6 +336,12 @@ export interface V1ItemRow {
   moderationHiddenAt?: Date | null
   valueRejectionReason?: string | null
   wantedItems: string | null
+  /** Optional: rows from a select that predates 23 Sep 2026 still shape. */
+  isPerishable?: boolean
+  quantity?: number | null
+  quantityUnit?: string | null
+  tradeWithinHours?: number | null
+  wantedCategories?: readonly { category: string }[]
   createdAt: Date
   userId: string
   pickupLat: number | null
@@ -276,6 +355,8 @@ export interface V1ItemRow {
     rating: number
     totalTrades: number
     lifetimeLeaves: number
+    /** Present only where V1_ITEM_OWNER_SELECT was used. Null for a person. */
+    organization?: OrgPublicRow | null
   }
   _count?: { likes: number; comments: number }
   likes?: { id: string }[]
@@ -304,7 +385,7 @@ export function v1Item(
     id: row.id,
     title: row.title,
     description: row.description,
-    images: parseImages(row.images),
+    images: imageUrls(row.images),
     category: row.category,
     categoryLabel: categoryLabel(row.category),
     condition: row.condition,
@@ -316,6 +397,25 @@ export function v1Item(
     hiddenByModerator: row.moderationHiddenAt != null,
     valueRejectionReason: row.valueRejectionReason ?? null,
     wanted: row.wantedItems ?? null,
+    // Built only when BOTH halves are present. `isPerishable` without a window
+    // is a row the write paths cannot produce, and shaping it as a perishable
+    // would hand the client a countdown to null.
+    perishable:
+      row.isPerishable && row.tradeWithinHours != null
+        ? {
+            quantity: row.quantity ?? null,
+            quantityUnit: row.quantityUnit ?? null,
+            tradeWithinHours: row.tradeWithinHours,
+            expiresAt: new Date(
+              row.createdAt.getTime() + row.tradeWithinHours * 60 * 60 * 1000,
+            ),
+            expired:
+              row.createdAt.getTime() + row.tradeWithinHours * 60 * 60 * 1000 < Date.now(),
+          }
+        : null,
+    featuredUntil: null,
+    lookingFor: (row.wantedCategories ?? []).map((w) => w.category),
+    lookingForLabels: (row.wantedCategories ?? []).map((w) => categoryLabel(w.category)),
     pickup: resolvePickup(row, viewerId, tradeAccessIds),
     // null when the caller did not select them. See the note on the field: a
     // caller that forgot under-claims rather than asserting "none".
@@ -331,8 +431,14 @@ export function v1Item(
       rank: getLeafRank(row.user.lifetimeLeaves).label,
       // ?? null, not ?? a default tier. A caller that forgot the map
       // under-claims rather than inventing a rung for someone.
-      trustTier: tiers?.get(row.user.id) ?? null,
+      //
+      // AND null outright for an organisation, whatever the map says. Orgs do
+      // not climb the trade-count ladder; their badge is `org` below. Enforced
+      // here rather than by asking every caller to remember, because the one
+      // caller that forgets renders a trust rung on a business.
+      trustTier: row.user.organization ? null : tiers?.get(row.user.id) ?? null,
       featuredAchievement: featuredAchievements?.get(row.user.id) ?? null,
+      org: row.user.organization ? orgBadge(row.user.organization) : null,
     },
     stats: v1Stats(row),
     createdAt: row.createdAt,

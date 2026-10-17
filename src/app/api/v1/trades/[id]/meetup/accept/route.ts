@@ -2,8 +2,10 @@ import { NextRequest } from "next/server"
 import { z } from "zod"
 import { resolveSession } from "@/lib/api-auth"
 import prisma from "@/lib/prisma"
-import { ok, unauthenticated, notFound, forbidden, conflict } from "@/lib/v1/envelope"
+import { ok, unauthenticated, notFound, forbidden, conflict, fail } from "@/lib/v1/envelope"
 import { parseJsonBody } from "@/lib/v1/body"
+import { withJsonErrors } from "@/lib/v1/with-json-errors"
+import { resolveTradeParticipant } from "@/lib/trade-participant"
 import { MEETUP_SELECT, v1MeetupPlan } from "@/lib/meetup"
 import { notifyMeetupChanged } from "@/lib/meetup-events"
 
@@ -50,20 +52,21 @@ const bodySchema = z.strictObject({
   confirmAt: z.string().datetime({ offset: true }).optional(),
 })
 
-export async function POST(
+export const POST = withJsonErrors("POST v1/trades/[id]/meetup/accept", acceptMeetup)
+
+async function acceptMeetup(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
   const session = await resolveSession()
   if (!session?.user?.id) return unauthenticated()
-  const viewerId = session.user.id
   const { id } = await params
 
   const parsed = await parseJsonBody(req, bodySchema)
   if (!parsed.ok) return parsed.response
   const { confirmHubId, confirmAt } = parsed.data
 
-  const trade = await prisma.tradeRequest.findUnique({
+  const trade = await prisma.trade.findUnique({
     where: { id },
     select: {
       id: true,
@@ -73,10 +76,15 @@ export async function POST(
       ...MEETUP_SELECT,
     },
   })
-  if (!trade) return notFound("Trade not found")
-  if (trade.senderId !== viewerId && trade.receiverId !== viewerId) {
-    return forbidden("That trade is not yours")
+  // A deal still in its offer phase is not a trade yet (schema v2).
+  if (!trade || trade.status === null) return notFound("Trade not found")
+  // Either side: the person, or the shop they are acting as. See
+  // @/lib/trade-participant.
+  const who = await resolveTradeParticipant(session.user.id, req.headers, trade)
+  if (!who.ok) {
+    return who.kind === "org_refused" ? fail("ORG_CONTEXT_REFUSED", who.message) : forbidden("That trade is not yours")
   }
+  const viewerId = who.participantId
   if (trade.status !== "ACCEPTED") {
     return conflict("That trade has moved past arranging a meeting.")
   }
@@ -103,11 +111,44 @@ export async function POST(
     return conflict("That plan changed before you agreed. Have another look.")
   }
 
-  const updated = await prisma.tradeRequest.update({
-    where: { id },
+  /*
+   * Conditional on the plan read above, in the UPDATE's own WHERE. The echo
+   * checks compare against a read; a counter landing between that read and
+   * this write would otherwise be marked agreed by somebody who never saw it.
+   */
+  const written = await prisma.trade.updateMany({
+    where: {
+      id,
+      status: "ACCEPTED",
+      meetupHubId: trade.meetupHubId,
+      meetupAt: trade.meetupAt,
+      meetupProposedBySender: trade.meetupProposedBySender,
+      meetupAgreedAt: null,
+    },
     data: { meetupAgreedAt: new Date() },
-    select: { id: true, ...MEETUP_SELECT },
   })
+
+  const updated = await prisma.trade.findUnique({
+    where: { id },
+    select: { id: true, status: true, ...MEETUP_SELECT },
+  })
+  if (!updated) return notFound("Trade not found")
+
+  if (written.count === 0) {
+    const samePlan =
+      updated.meetupHubId === trade.meetupHubId &&
+      updated.meetupAt?.getTime() === trade.meetupAt.getTime() &&
+      updated.meetupProposedBySender === trade.meetupProposedBySender
+    if (samePlan && updated.meetupAgreedAt) {
+      // A double tap racing itself: the other request agreed this same plan.
+      return ok({ plan: v1MeetupPlan(updated), alreadyAgreed: true })
+    }
+    if (updated.status !== "ACCEPTED") return conflict("That trade has moved past arranging a meeting.")
+    return conflict("That plan changed before you agreed. Have another look.", {
+      rule: "MEETUP_CHANGED",
+      plan: v1MeetupPlan(updated),
+    })
+  }
 
   const partnerId = viewerIsSender ? trade.receiverId : trade.senderId
 

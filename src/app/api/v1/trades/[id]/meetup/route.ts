@@ -2,8 +2,11 @@ import { NextRequest } from "next/server"
 import { z } from "zod"
 import { resolveSession } from "@/lib/api-auth"
 import prisma from "@/lib/prisma"
-import { ok, unauthenticated, notFound, forbidden, conflict, invalid } from "@/lib/v1/envelope"
+import type { Prisma } from "@/generated/prisma/client"
+import { ok, unauthenticated, notFound, forbidden, conflict, fail, invalid } from "@/lib/v1/envelope"
 import { parseJsonBody } from "@/lib/v1/body"
+import { withJsonErrors } from "@/lib/v1/with-json-errors"
+import { resolveTradeParticipant } from "@/lib/trade-participant"
 import { v1Hub } from "@/lib/safe-zones"
 import { MEETUP_SELECT, allHubs, listingHubIds, proposableHub, v1MeetupPlan } from "@/lib/meetup"
 import { notifyMeetupChanged } from "@/lib/meetup-events"
@@ -23,16 +26,30 @@ export const dynamic = "force-dynamic"
  *
  * ══ A COUNTER IS A PROPOSAL, SO THERE IS NO DECLINE ═════════════════════════
  *
- * POST from the other side overwrites the plan and clears `meetupAgreedAt`.
- * That is the whole disagreement mechanism, and it is deliberately the only one:
- * a bare decline empties the table and leaves both parties where they started,
- * with nothing to react to. Countering always leaves something on it.
+ * A counter overwrites the plan and clears `meetupAgreedAt`. That is the whole
+ * disagreement mechanism, and it is deliberately the only one: a bare decline
+ * empties the table and leaves both parties where they started, with nothing to
+ * react to. Countering always leaves something on it.
  *
- * The cost is that the LAST proposal wins, including over an already-agreed one.
- * That is correct — plans change, and re-proposing is how you say so — but it
- * means an agreed plan can be reopened by one side. It is not silent: the
- * agreement is cleared, so both rows go back to reading "waiting on you", and
- * the other party is notified.
+ * ══ A COUNTER MUST NAME WHAT IT REPLACES ════════════════════════════════════
+ *
+ * Until 8 Oct 2026 any POST overwrote whatever stood, and a two-phone test
+ * showed what that costs: B's screen still read "Choose a hub" after A had
+ * suggested one, B picked, and A's suggestion vanished under B's without
+ * either of them being told. A "fresh" pick and a counter looked identical.
+ *
+ * So the body now says which it is. Without `replaces` it is a FRESH pick and
+ * is only legal on an empty table or over the caller's own unanswered
+ * suggestion ("Change suggestion"). With `replaces` it is a COUNTER, and it
+ * lands only if the plan standing is still the one it names — hub, instant,
+ * and side. That includes reopening an AGREED plan: allowed, because plans
+ * change, but only by somebody who saw the agreement and countered it, never
+ * by a stale screen. Everything else is a 409 carrying the plan that IS
+ * standing, so the client can show it with Agree / Suggest another.
+ *
+ * The precondition is the WHERE of a single UPDATE, not a read followed by a
+ * write: two suggestions sent at the same moment cannot both match it, so
+ * exactly one wins and the other gets the 409.
  *
  * ══ AGREEING DOES NOT ISSUE CODES ═══════════════════════════════════════════
  *
@@ -74,7 +91,39 @@ const bodySchema = z.strictObject({
    */
   at: z.string().datetime({ offset: true }),
   note: z.string().trim().max(200).optional(),
+  /**
+   * The standing plan this counters, as the caller's screen showed it. Present
+   * means "Suggest another"; absent means a fresh pick. See the header.
+   */
+  replaces: z
+    .strictObject({
+      hubId: z.string().min(1).max(64),
+      at: z.string().datetime({ offset: true }),
+      proposedBy: z.enum(["sender", "receiver"]),
+    })
+    .optional(),
 })
+
+/**
+ * The 409 for "that is not the plan standing any more", with the plan that is.
+ *
+ * `meta.rule` rather than new top-level codes, for the reason the hub check
+ * below gives: /api/v1's code union is closed. The client branches on it.
+ *   MEETUP_PENDING_FROM_PARTNER  the other side has an unanswered suggestion
+ *   MEETUP_ALREADY_AGREED        the plan is agreed; reopening it is a counter
+ *   MEETUP_CHANGED               the plan the counter named has been replaced
+ */
+type PlanRule = "MEETUP_PENDING_FROM_PARTNER" | "MEETUP_ALREADY_AGREED" | "MEETUP_CHANGED"
+
+const PLAN_CONFLICT_MESSAGE: Record<PlanRule, string> = {
+  MEETUP_PENDING_FROM_PARTNER: "The other trader already suggested a meeting. Agree to it, or suggest another.",
+  MEETUP_ALREADY_AGREED: "You have both agreed a meeting already. Have another look before changing it.",
+  MEETUP_CHANGED: "That plan changed before your suggestion went through. Have another look.",
+}
+
+function planConflict(rule: PlanRule, plan: ReturnType<typeof v1MeetupPlan>) {
+  return conflict(PLAN_CONFLICT_MESSAGE[rule], { rule, plan })
+}
 
 /** The trade columns both handlers need. */
 const TRADE_SELECT = {
@@ -87,20 +136,27 @@ const TRADE_SELECT = {
   ...MEETUP_SELECT,
 } as const
 
-export async function GET(
-  _req: NextRequest,
+export const GET = withJsonErrors("GET v1/trades/[id]/meetup", getMeetup)
+export const POST = withJsonErrors("POST v1/trades/[id]/meetup", proposeMeetup)
+
+async function getMeetup(
+  req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
   const session = await resolveSession()
   if (!session?.user?.id) return unauthenticated()
-  const viewerId = session.user.id
   const { id } = await params
 
-  const trade = await prisma.tradeRequest.findUnique({ where: { id }, select: TRADE_SELECT })
-  if (!trade) return notFound("Trade not found")
-  if (trade.senderId !== viewerId && trade.receiverId !== viewerId) {
-    return forbidden("That trade is not yours")
+  const trade = await prisma.trade.findUnique({ where: { id }, select: TRADE_SELECT })
+  // A deal still in its offer phase is not a trade yet (schema v2).
+  if (!trade || trade.status === null) return notFound("Trade not found")
+  // Either side: the person, or the shop they are acting as. See
+  // @/lib/trade-participant.
+  const who = await resolveTradeParticipant(session.user.id, req.headers, trade)
+  if (!who.ok) {
+    return who.kind === "org_refused" ? fail("ORG_CONTEXT_REFUSED", who.message) : forbidden("That trade is not yours")
   }
+  const viewerId = who.participantId
 
   /*
    * ── EVERY OPEN HUB IS ON THE TABLE; THE SHARED ONES ARE THE SUGGESTION ──────
@@ -121,8 +177,9 @@ export async function GET(
    * `theirs` to say which places would become shared the moment they were added.
    */
   const viewerIsSender = trade.senderId === viewerId
-  const yourItemId = viewerIsSender ? trade.offeredItemId : trade.requestedItemId
-  const theirItemId = viewerIsSender ? trade.requestedItemId : trade.offeredItemId
+  // offeredItemId is set on every trade (a schema v2 CHECK); `as string` for the type.
+  const yourItemId = viewerIsSender ? (trade.offeredItemId as string) : trade.requestedItemId
+  const theirItemId = viewerIsSender ? trade.requestedItemId : (trade.offeredItemId as string)
 
   const [hubs, named] = await Promise.all([
     allHubs(prisma),
@@ -145,24 +202,28 @@ export async function GET(
   })
 }
 
-export async function POST(
+async function proposeMeetup(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
   const session = await resolveSession()
   if (!session?.user?.id) return unauthenticated()
-  const viewerId = session.user.id
   const { id } = await params
 
   const parsed = await parseJsonBody(req, bodySchema)
   if (!parsed.ok) return parsed.response
   const { hubId, note } = parsed.data
 
-  const trade = await prisma.tradeRequest.findUnique({ where: { id }, select: TRADE_SELECT })
-  if (!trade) return notFound("Trade not found")
-  if (trade.senderId !== viewerId && trade.receiverId !== viewerId) {
-    return forbidden("That trade is not yours")
+  const trade = await prisma.trade.findUnique({ where: { id }, select: TRADE_SELECT })
+  // A deal still in its offer phase is not a trade yet (schema v2).
+  if (!trade || trade.status === null) return notFound("Trade not found")
+  // Either side: the person, or the shop they are acting as. See
+  // @/lib/trade-participant.
+  const who = await resolveTradeParticipant(session.user.id, req.headers, trade)
+  if (!who.ok) {
+    return who.kind === "org_refused" ? fail("ORG_CONTEXT_REFUSED", who.message) : forbidden("That trade is not yours")
   }
+  const viewerId = who.participantId
 
   /*
    * ACCEPTED ONLY, and both neighbours are excluded for their own reason.
@@ -201,9 +262,35 @@ export async function POST(
   if (!check.ok) return invalid(check.message, { rule: check.code })
 
   const viewerIsSender = trade.senderId === viewerId
+  const replaces = parsed.data.replaces
 
-  const updated = await prisma.tradeRequest.update({
-    where: { id },
+  /*
+   * The precondition, as a WHERE. Read above only to choose WHICH condition
+   * applies; whether it still holds is decided by the UPDATE itself.
+   */
+  let guard: Prisma.TradeWhereInput
+  if (replaces) {
+    // A counter: lands only on the exact plan the caller's screen showed.
+    guard = {
+      meetupHubId: replaces.hubId,
+      meetupAt: new Date(replaces.at),
+      meetupProposedBySender: replaces.proposedBy === "sender",
+    }
+  } else if (trade.meetupHubId === null) {
+    guard = { meetupHubId: null }
+  } else if (trade.meetupProposedBySender === viewerIsSender && trade.meetupAgreedAt === null) {
+    // "Change suggestion": your own, still unanswered.
+    guard = { meetupProposedBySender: viewerIsSender, meetupAgreedAt: null }
+  } else {
+    return planConflict(
+      trade.meetupAgreedAt ? "MEETUP_ALREADY_AGREED" : "MEETUP_PENDING_FROM_PARTNER",
+      v1MeetupPlan(trade),
+    )
+  }
+
+  const written = await prisma.trade.updateMany({
+    // status too: the trade can move to CONFIRMING between the read and here.
+    where: { id, status: "ACCEPTED", ...guard },
     data: {
       meetupHubId: hubId,
       meetupAt: at,
@@ -213,8 +300,20 @@ export async function POST(
       // one that had been agreed. The whole group moves together.
       meetupAgreedAt: null,
     },
-    select: TRADE_SELECT,
   })
+
+  const updated = await prisma.trade.findUnique({ where: { id }, select: TRADE_SELECT })
+  if (!updated) return notFound("Trade not found")
+
+  if (written.count === 0) {
+    // Somebody else's write got there first. Say what is standing NOW.
+    if (updated.status !== "ACCEPTED") return conflict("That trade has moved past arranging a meeting.")
+    const partnerPending =
+      updated.meetupHubId !== null &&
+      updated.meetupAgreedAt === null &&
+      updated.meetupProposedBySender !== viewerIsSender
+    return planConflict(partnerPending ? "MEETUP_PENDING_FROM_PARTNER" : "MEETUP_CHANGED", v1MeetupPlan(updated))
+  }
 
   const partnerId = viewerIsSender ? trade.receiverId : trade.senderId
 

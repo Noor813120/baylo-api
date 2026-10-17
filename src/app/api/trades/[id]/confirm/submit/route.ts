@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server"
 import { resolveSession } from "@/lib/api-auth"
 import prisma from "@/lib/prisma"
 import bcrypt from "bcryptjs"
-import pusher from "@/lib/pusher"
+import { notifyUser } from "@/lib/realtime"
 import { awardTask } from "@/lib/tasks"
 import { MAX_CODE_ATTEMPTS } from "@/lib/swap-code"
 import { confirmSubmitSchema, parseBody } from "@/lib/validation"
@@ -11,6 +11,10 @@ import { payBridgeFee } from "@/lib/bridge-fee"
 import { awardTradeRewards, rewardDenialCopy, type RewardOutcome } from "@/lib/trade-reward"
 import { resolveMeetupHub } from "@/lib/safe-zones"
 import { createSystemMessage } from "@/lib/system-message"
+import { settleQuestsAsync, TRADE_QUESTS } from "@/lib/quests"
+import {
+  isShopMemberPair, legacyParticipantRefusal, resolveTradeParticipant, shopMemberSelfTradeRefusal,
+} from "@/lib/trade-participant"
 
 export async function POST(
   req: NextRequest,
@@ -21,11 +25,11 @@ export async function POST(
     if (!session?.user?.id) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
 
     const { id: tradeId } = await params
-    const myId = session.user.id
+    const humanId = session.user.id
 
     // A second, coarser brake on top of the per-code counter below: the counter
     // burns one code, this bounds how fast a caller can burn codes at all.
-    const limited = enforceRateLimit("confirmSubmit", myId)
+    const limited = enforceRateLimit("confirmSubmit", humanId)
     if (limited) return limited
 
     const parsed = await parseBody(req, confirmSubmitSchema)
@@ -33,7 +37,7 @@ export async function POST(
     const body = parsed.data
     const submitted = body.code
 
-    const trade = await prisma.tradeRequest.findUnique({
+    const found = await prisma.trade.findUnique({
       where: { id: tradeId },
       include: {
         sender:        { select: { id: true, name: true, email: true } },
@@ -43,10 +47,22 @@ export async function POST(
       },
     })
 
-    if (!trade) return NextResponse.json({ error: "Trade not found" }, { status: 404 })
-    if (trade.senderId !== myId && trade.receiverId !== myId) {
-      return NextResponse.json({ error: "Forbidden" }, { status: 403 })
+    // A deal still in its offer phase is not a trade yet (schema v2).
+    if (!found || found.status === null || found.offeredItemId === null || found.offeredItem === null) {
+      return NextResponse.json({ error: "Trade not found" }, { status: 404 })
     }
+    const trade = { ...found, status: found.status, offeredItemId: found.offeredItemId, offeredItem: found.offeredItem }
+    // Either side: the person, or the shop they are acting as. A staff
+    // member entering the partner's code while acting as the shop IS the shop
+    // fulfilling its side: its code row is marked used and its items move.
+    // See @/lib/trade-participant.
+    const who = await resolveTradeParticipant(session.user.id, req.headers, trade)
+    if (!who.ok) return legacyParticipantRefusal(who)
+    const myId = who.participantId
+    // A shop and one of its own members, at settlement too: a person invited
+    // after the trade was accepted can read BOTH swap codes and would settle
+    // with themselves. Cancelling stays open. See @/lib/trade-participant.
+    if (await isShopMemberPair(prisma, trade.senderId, trade.receiverId)) return shopMemberSelfTradeRefusal()
     if (trade.status !== "CONFIRMING" && trade.status !== "COMPLETED") {
       return NextResponse.json({ error: "Trade is not in confirmation phase" }, { status: 400 })
     }
@@ -111,7 +127,7 @@ export async function POST(
 
     // The user enters their PARTNER's code (cross-exchange proves in-person meeting).
     // So we verify the submitted code against the PARTNER's stored hash.
-    const partnerCode = await prisma.swapConfirmationCode.findUnique({
+    const partnerCode = await prisma.swapCode.findUnique({
       where: { tradeId_userId: { tradeId, userId: partnerId } },
     })
 
@@ -137,7 +153,7 @@ export async function POST(
     if (!match) {
       // The increment is conditional on the value we just read, so two requests
       // racing the same code cannot both spend the same attempt slot.
-      const spent = await prisma.swapConfirmationCode.updateMany({
+      const spent = await prisma.swapCode.updateMany({
         where: { tradeId, userId: partnerId, attempts: partnerCode.attempts },
         data: { attempts: partnerCode.attempts + 1 },
       })
@@ -159,7 +175,7 @@ export async function POST(
     }
 
     // Mark the partner's code as used (= "I submitted my partner's code correctly")
-    await prisma.swapConfirmationCode.update({
+    await prisma.swapCode.update({
       where: { tradeId_userId: { tradeId, userId: partnerId } },
       data:  { used: true },
     })
@@ -210,19 +226,19 @@ export async function POST(
     }
 
     if (claimHubId) {
-      await prisma.tradeRequest.update({
+      await prisma.trade.update({
         where: { id: tradeId },
         data:  { safeZoneHubId: claimHubId },
       })
     }
 
     // Check if the other participant has already verified
-    const myCode = await prisma.swapConfirmationCode.findUnique({
+    const myCode = await prisma.swapCode.findUnique({
       where: { tradeId_userId: { tradeId, userId: myId } },
     })
     const bothVerified = partnerCode !== null && (myCode?.used ?? false)
     // After marking partner's code used, re-check:
-    const updatedCodes = await prisma.swapConfirmationCode.findMany({
+    const updatedCodes = await prisma.swapCode.findMany({
       where:  { tradeId },
       select: { used: true },
     })
@@ -241,7 +257,7 @@ export async function POST(
 
     try {
       rewards = await prisma.$transaction(async (tx) => {
-        const freshTrade = await tx.tradeRequest.findUnique({
+        const freshTrade = await tx.trade.findUnique({
           where:  { id: tradeId },
           select: {
             status: true,
@@ -272,17 +288,6 @@ export async function POST(
         // See the regression test in scripts/verify-settlement-offeredleaves.ts.
         const leaves = freshTrade?.offeredLeaves ?? 0
 
-        // Provenance only — which offer this settlement came from, for the
-        // ledger's optional offerId. Ordered so it is at least deterministic;
-        // nothing about the amount depends on it, and a miss is not an error.
-        const offer = leaves > 0
-          ? await tx.offer.findFirst({
-              where:   { senderId: trade.senderId, postId: trade.requestedItemId, status: "ACCEPTED" },
-              select:  { id: true },
-              orderBy: { updatedAt: "desc" },
-            })
-          : null
-
         if (leaves > 0) {
           const freshSender = await tx.user.findUnique({
             where:  { id: trade.senderId },
@@ -291,7 +296,11 @@ export async function POST(
           if (!freshSender || freshSender.leaves < leaves) throw new Error("insufficient_leaves")
         }
 
-        await tx.tradeRequest.update({ where: { id: tradeId }, data: { status: "COMPLETED" } })
+        // completedAt is the moment settlement commits, written here and nowhere
+        // else. The daily trade quests read it; updatedAt would move on any
+        // later write to the row. See the column's note.
+        const completedAt = new Date()
+        await tx.trade.update({ where: { id: tradeId }, data: { status: "COMPLETED", completedAt } })
         await tx.item.update({ where: { id: trade.offeredItemId },   data: { userId: trade.receiverId, status: "OWNED" } })
         await tx.item.update({ where: { id: trade.requestedItemId }, data: { userId: trade.senderId,   status: "OWNED" } })
         await tx.user.updateMany({
@@ -316,14 +325,14 @@ export async function POST(
             data: {
               userId: trade.senderId, type: "TRADE_SPEND", amount: -leaves,
               description: `Leaves given to ${trade.receiver.name} for trade`,
-              offerId: offer?.id, tradeId, eventAt: settledAt,
+              tradeId, eventAt: settledAt,
             },
           })
           await tx.leafTransaction.create({
             data: {
               userId: trade.receiverId, type: "TRADE_RECEIVE", amount: leaves,
               description: `Leaves received from ${trade.sender.name} for trade`,
-              offerId: offer?.id, tradeId, eventAt: settledAt,
+              tradeId, eventAt: settledAt,
             },
           })
         }
@@ -342,7 +351,7 @@ export async function POST(
          * review), and re-deriving would pay the wrong person because somebody
          * edited a listing. See the column's note.
          *
-         * payBridgeFee() refuses a second payment against the same offer, so a
+         * payBridgeFee() refuses a second payment against the same deal, so a
          * replayed settlement cannot pay twice.
          */
         const fee = freshTrade?.bridgeFeeLeaves ?? 0
@@ -350,23 +359,16 @@ export async function POST(
           const paidBySender = freshTrade!.bridgeFeePaidBySender as boolean
           const feeTo = paidBySender ? trade.receiverId : trade.senderId
           const feeFrom = paidBySender ? trade.sender.name : trade.receiver.name
-          // The offer this trade came from, for the ledger's offerId and for
-          // the once-only guard, which is keyed on it.
-          const feeOffer = await tx.offer.findFirst({
-            where:   { senderId: trade.senderId, postId: trade.requestedItemId, status: "ACCEPTED" },
-            select:  { id: true },
-            orderBy: { updatedAt: "desc" },
+          // The hold, and the once-only guard, are keyed on this deal's id:
+          // since schema v2 the offer and the trade are one row, so there is
+          // no longer an offer to re-find first.
+          await payBridgeFee(tx, {
+            receiverId: feeTo,
+            proposerName: feeFrom ?? "your trading partner",
+            tradeId,
+            amount: fee,
+            at: new Date(),
           })
-          if (feeOffer) {
-            await payBridgeFee(tx, {
-              receiverId: feeTo,
-              proposerName: feeFrom ?? "your trading partner",
-              offerId: feeOffer.id,
-              tradeId,
-              amount: fee,
-              at: new Date(),
-            })
-          }
         }
 
         // Task rewards are awarded here, at the moment settlement completes —
@@ -376,7 +378,7 @@ export async function POST(
         // counterparty is new to the user inside NEW_PARTNER_WINDOW_DAYS.
         // safeZoneHubId is re-read here: the second submitter may have set it
         // in this very request, after `trade` was loaded.
-        const settled = await tx.tradeRequest.findUnique({
+        const settled = await tx.trade.findUnique({
           where:  { id: tradeId },
           select: { safeZoneHubId: true },
         })
@@ -427,7 +429,7 @@ export async function POST(
           receiverId: trade.receiverId,
           offeredItemId: trade.offeredItemId,
           requestedItemId: trade.requestedItemId,
-          completedAt: new Date(),
+          completedAt,
         })
       })
     } catch (txErr) {
@@ -442,6 +444,12 @@ export async function POST(
       }
       throw txErr
     }
+
+    // The daily trade quests for both parties, now that settlement has
+    // committed. Fire-and-forget. Not reached on the already_completed replay
+    // above, which returns early, and a replay would pay nothing anyway.
+    settleQuestsAsync(trade.senderId, TRADE_QUESTS)
+    settleQuestsAsync(trade.receiverId, TRADE_QUESTS)
 
     // "+4 Leaves" belongs in the notification, not only on the screen of
     // whoever happened to submit the second code: the other party may not have
@@ -466,16 +474,13 @@ export async function POST(
       }),
     ])
 
+    // The notifications stay fire-and-forget, as they were. The realtime events
+    // used to sit in the same array, where a trigger that threw before
+    // returning a promise threw out of the array literal: the trade was already
+    // COMPLETED and paid, the caller got a 500 on the last code, and the two
+    // notifications were never written. notifyUser() cannot throw. See
+    // @/lib/realtime.
     void Promise.allSettled([
-      ...completionMessages.map((message) =>
-        pusher.trigger(`private-user-${message.receiverId}`, "new-message", {
-          id: message.id,
-          content: message.content,
-          senderId: message.senderId,
-          receiverId: message.receiverId,
-          createdAt: message.createdAt.toISOString(),
-        }),
-      ),
       prisma.notification.create({
         data: {
           userId: trade.senderId, type: "TRADE_COMPLETED",
@@ -492,12 +497,19 @@ export async function POST(
           entityType: "trade", entityId: tradeId,
         },
       }),
-      pusher.trigger(`private-user-${trade.senderId}`, "trade-status-changed", {
-        tradeId, newStatus: "COMPLETED", itemIds,
-      }),
-      pusher.trigger(`private-user-${trade.receiverId}`, "trade-status-changed", {
-        tradeId, newStatus: "COMPLETED", itemIds,
-      }),
+    ])
+    await Promise.all([
+      ...completionMessages.map((message) =>
+        notifyUser(message.receiverId, "new-message", {
+          id: message.id,
+          content: message.content,
+          senderId: message.senderId,
+          receiverId: message.receiverId,
+          createdAt: message.createdAt.toISOString(),
+        }),
+      ),
+      notifyUser(trade.senderId, "trade-status-changed", { tradeId, newStatus: "COMPLETED", itemIds }),
+      notifyUser(trade.receiverId, "trade-status-changed", { tradeId, newStatus: "COMPLETED", itemIds }),
     ])
 
     /*

@@ -21,7 +21,7 @@ import {
  * ── DENIALS ARE SILENT IN THE LEDGER, LOUD IN THE RESPONSE ──────────────────
  *
  * A party the anti-farming gates refuse gets no row at all -- not a zero row.
- * TaskCompletion writes zero rows because a later backfill would otherwise
+ * awardTask() writes zero rows because a later backfill would otherwise
  * re-pay; there is no backfill for this reward (it is paid inside the
  * settlement transaction or not at all), so a zero row would only be noise in
  * a table whose every other row is a Leaf movement. The reason is returned to
@@ -34,7 +34,7 @@ import {
  * at all. The `already_awarded` check is belt and braces for a replay.
  */
 
-type RewardDb = Pick<PrismaClient, "user" | "leafTransaction" | "tradeRequest" | "item">
+type RewardDb = Pick<PrismaClient, "user" | "leafTransaction" | "trade" | "item">
 
 const DAY_MS = 24 * 60 * 60 * 1000
 
@@ -51,6 +51,8 @@ export type RewardReason =
   /** This party has collected the daily cap already. */
   | "daily_cap"
   | "already_awarded"
+  /** This party is an organisation's backing row. Shops earn no trade reward. */
+  | "organization"
 
 export interface RewardOutcome {
   userId: string
@@ -101,6 +103,13 @@ async function awardOne(
 
   if (trade.offeredItemId === trade.requestedItemId) return none("placeholder")
 
+  // A shop settling as itself (26 Sep 2026) is paid nothing new: its Leaves
+  // come from its welcome grant and from bridging fees, never from issuance.
+  // Same rule as the task rewards and the quests. The PERSON on the other side
+  // is still rewarded as usual -- this skips one side, not the trade.
+  const earner = await db.user.findUnique({ where: { id: userId }, select: { isOrgAccount: true } })
+  if (earner?.isOrgAccount) return none("organization")
+
   const given = await db.item.findUnique({ where: { id: givenItemId }, select: { valueLeaves: true } })
   if (!given || given.valueLeaves === null) return none("unvalued")
   const givenBracket = bracketOf(given.valueLeaves)
@@ -115,7 +124,7 @@ async function awardOne(
   // Gate 1 -- the pair. Any other COMPLETED trade between these two inside
   // the window, either direction, judged on when THAT trade completed.
   const pairSince = new Date(trade.completedAt.getTime() - TRADE_REWARD_REPEAT_PAIR_DAYS * DAY_MS)
-  const priorPair = await db.tradeRequest.findFirst({
+  const priorPair = await db.trade.findFirst({
     where: {
       id: { not: trade.id },
       status: "COMPLETED",
@@ -133,7 +142,7 @@ async function awardOne(
   // the window, on either side. An item keeps its id through relisting, which
   // is exactly what lets this catch a ring the pair rule cannot see.
   const itemSince = new Date(trade.completedAt.getTime() - TRADE_REWARD_SAME_ITEM_DAYS * DAY_MS)
-  const priorItem = await db.tradeRequest.findFirst({
+  const priorItem = await db.trade.findFirst({
     where: {
       id: { not: trade.id },
       status: "COMPLETED",
@@ -236,6 +245,8 @@ export function rewardDenialCopy(outcome: RewardOutcome, partnerName: string): s
       return `No trade reward this time — you've reached today's ${TRADE_REWARD_DAILY_CAP_LEAVES}-Leaf limit.`
     case "unvalued":
       return "No trade reward — the item you gave has no value on record."
+    case "organization":
+      return "Shops don't earn trade rewards."
     case "placeholder":
     case "already_awarded":
       return null

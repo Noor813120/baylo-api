@@ -22,73 +22,33 @@ export async function PATCH(req: NextRequest) {
 
     const { achievementIds, featuredAchievementId } = parsed.data
 
-    // Clear the whole shelf first, then set the picked order. The blanket reset
-    // is what makes a badge the user REMOVED leave the shelf: an update scoped to
-    // `achievementId IN (...)` could only ever touch the badges that stayed, so a
-    // deselected badge kept its stale displayOrder and reappeared on the next
-    // load. This also handles the empty selection (cleared shelf) correctly.
-    await prisma.$executeRawUnsafe(
-      `
-        UPDATE "UserAchievement"
-        SET "displayOrder" = NULL
-        WHERE "userId" = '${session.user.id}'
-      `,
-    )
+    // ── TYPED WRITES, NOT RAW SQL (schema v2) ──────────────────────────────
+    //
+    // These were `$executeRaw` against a schema-qualified "UserAchievement".
+    // Earned badges are ACHIEVEMENT rows of UserProgress now, and every write
+    // below is a Prisma model call scoped by `type` -- so it can neither reach
+    // another schema nor touch a QUEST row, and no id is ever spliced into SQL
+    // (the 23 Sep 2026 injection was a spliced id). The column feature-detect
+    // is gone with the raw SQL: homeDisplayOrder always exists in v2.
+    //
+    // Same three steps, same results, as the raw version:
+    //   1  clear the whole shelf (so a REMOVED badge leaves it);
+    //   2  number the picks 1..n, first occurrence winning, as the CASE did;
+    //   3  the home slot: 1 on the featured badge, NULL on every other.
+    const userId = session.user.id
+    const mine = { userId, type: "ACHIEVEMENT" as const }
+    const picks = [...new Set(achievementIds)]
 
-    if (achievementIds.length > 0) {
-      await prisma.$executeRawUnsafe(
-        `
-          UPDATE "UserAchievement"
-          SET "displayOrder" = CASE "achievementId"
-            ${achievementIds.map((id, index) => `WHEN '${id.replace(/'/g, "''")}' THEN ${index + 1}`).join(" ")}
-            ELSE NULL
-          END
-          WHERE "userId" = '${session.user.id}'
-            AND "achievementId" IN (${achievementIds.map((id) => `'${id.replace(/'/g, "''")}'`).join(", ")})
-        `,
-      )
-    }
-
-    const columns = await prisma.$queryRaw<Array<{ column_name: string }>>`
-      SELECT column_name
-      FROM information_schema.columns
-      WHERE table_name = 'UserAchievement' AND column_name = 'homeDisplayOrder'
-    `
-
-    if (columns.length > 0) {
-      if (featuredAchievementId) {
-        await prisma.$executeRawUnsafe(
-          `
-            UPDATE "UserAchievement"
-            SET "homeDisplayOrder" = CASE "achievementId"
-              WHEN '${featuredAchievementId.replace(/'/g, "''")}' THEN 1
-              ELSE NULL
-            END
-            WHERE "userId" = '${session.user.id}'
-          `,
-        )
-      } else {
-        await prisma.$executeRawUnsafe(
-          `
-            UPDATE "UserAchievement"
-            SET "homeDisplayOrder" = NULL
-            WHERE "userId" = '${session.user.id}'
-          `,
-        )
+    await prisma.$transaction(async (tx) => {
+      await tx.userProgress.updateMany({ where: mine, data: { displayOrder: null } })
+      for (let index = 0; index < picks.length; index++) {
+        await tx.userProgress.updateMany({ where: { ...mine, achievementId: picks[index] }, data: { displayOrder: index + 1 } })
       }
-    } else if (featuredAchievementId && achievementIds.length > 0) {
-      await prisma.$executeRawUnsafe(
-        `
-          UPDATE "UserAchievement"
-          SET "displayOrder" = CASE "achievementId"
-            WHEN '${featuredAchievementId.replace(/'/g, "''")}' THEN 1
-            ELSE "displayOrder"
-          END
-          WHERE "userId" = '${session.user.id}'
-            AND "achievementId" = '${featuredAchievementId.replace(/'/g, "''")}'
-        `,
-      )
-    }
+      await tx.userProgress.updateMany({ where: mine, data: { homeDisplayOrder: null } })
+      if (featuredAchievementId) {
+        await tx.userProgress.updateMany({ where: { ...mine, achievementId: featuredAchievementId }, data: { homeDisplayOrder: 1 } })
+      }
+    })
 
     return ok({ ok: true })
   } catch {
