@@ -4,7 +4,9 @@ import type { NextConfig } from "next";
  * Content-Security-Policy.
  *
  * `'unsafe-inline'` for styles is required by the inline `style={{...}}` props
- * used throughout the dashboard; `'unsafe-eval'` is NOT granted. `connect-src`
+ * used throughout the dashboard; `'unsafe-eval'` is NOT granted in production.
+ * Development adds it: React's dev build calls eval() to rebuild call stacks,
+ * and without it every dev page logs a CSP error (the "1 Issue" badge). `connect-src`
  * includes the Pusher endpoints the realtime client opens and the Nominatim
  * endpoint the pickup map geocodes against — anything not listed cannot be
  * reached from a page, which is what makes the policy worth having.
@@ -15,7 +17,7 @@ const CSP = [
   "object-src 'none'",
   "frame-ancestors 'none'",
   "form-action 'self'",
-  "script-src 'self' 'unsafe-inline'",
+  `script-src 'self' 'unsafe-inline'${process.env.NODE_ENV === "production" ? "" : " 'unsafe-eval'"}`,
   "style-src 'self' 'unsafe-inline' https://unpkg.com",
   "img-src 'self' data: blob: https://res.cloudinary.com https://lh3.googleusercontent.com https://*.tile.openstreetmap.org https://unpkg.com",
   "media-src 'self' blob: https://res.cloudinary.com",
@@ -41,7 +43,26 @@ const SECURITY_HEADERS = [
   { key: "Permissions-Policy", value: "geolocation=(self), camera=(), microphone=(self), payment=()" },
 ];
 
+/**
+ * Hosts that may load the DEV server's /_next scripts, besides localhost.
+ *
+ * Next 16 answers 403 for /_next/* requested from any other origin, and a page
+ * whose scripts are refused never hydrates. That is exactly what a phone sees
+ * at http://<this laptop's LAN IP>:3000: the page renders and every onClick on
+ * it is dead (17 Oct 2026, "Confirm my email" did nothing on a real phone).
+ * Private ranges only, matched segment by segment by Next. Dev only: Next does
+ * not consult this in production.
+ */
+const LAN_DEV_ORIGINS = [
+  "127.0.0.1",
+  "10.*.*.*",
+  "192.168.*.*",
+  ...Array.from({ length: 16 }, (_, i) => `172.${16 + i}.*.*`),
+];
+
 const nextConfig: NextConfig = {
+  allowedDevOrigins: LAN_DEV_ORIGINS,
+
   async redirects() {
     return [{ source: "/admin/anomalies", destination: "/admin/review-queue", permanent: true }];
   },
