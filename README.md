@@ -2,7 +2,7 @@
 
 # 🌿 Baylo
 
-**Barter, not buy.**
+**Buy less, Baylo.**
 
 A mobile marketplace where people trade what they no longer use for what they actually need — no money, anywhere in the app.
 
