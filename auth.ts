@@ -3,7 +3,7 @@ import Credentials from "next-auth/providers/credentials"
 import Google from "next-auth/providers/google"
 import bcrypt from "bcryptjs"
 import prisma from "@/lib/prisma"
-import { markVerified } from "@/lib/verification"
+import { claimUnverifiedForGoogle, markVerified } from "@/lib/verification"
 import { rateLimit, clientIp } from "@/lib/rate-limit"
 import { RATE_LIMITS } from "@/lib/rate-limit-config"
 
@@ -74,8 +74,11 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
     signIn: "/auth/login",
   },
   callbacks: {
-    async signIn({ user, account }) {
+    async signIn({ user, account, profile }) {
       if (account?.provider === "google") {
+        // Same rule as the native endpoint: an address Google has not itself
+        // confirmed must not match an existing Baylo account.
+        if (profile?.email_verified !== true) return false
         // Lowercased, like every other path that touches User.email. On MySQL
         // the case-insensitive collation hid a missing normalisation here; on
         // Postgres the unique index is case-sensitive and a capitalised Google
@@ -84,6 +87,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         const existing = await prisma.user.findUnique({ where: { email } })
         if (existing) {
           user.id = existing.id
+          await claimUnverifiedForGoogle(existing.id)
         } else {
           const created = await prisma.user.create({
             data: {
