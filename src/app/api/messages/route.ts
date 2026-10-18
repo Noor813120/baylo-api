@@ -110,6 +110,16 @@ export async function POST(req: NextRequest) {
     const blocked = await enforceNotBlocked(senderId, receiverId, "message this person")
     if (blocked) return blocked
 
+    // A message may only be filed under a trade between these same two parties;
+    // otherwise anyone could post into a stranger's trade thread.
+    if (tradeId) {
+      const pair = [senderId, receiverId]
+      const trade = await prisma.trade.count({
+        where: { id: tradeId, senderId: { in: pair }, receiverId: { in: pair } },
+      })
+      if (trade === 0) return NextResponse.json({ error: "Trade not found" }, { status: 404 })
+    }
+
     const message = await prisma.$transaction(async (tx) => {
       return tx.message.create({
         data: {
