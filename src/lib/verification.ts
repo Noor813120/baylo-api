@@ -1,4 +1,5 @@
 import prisma from "@/lib/prisma"
+import { revokeUserFamilies } from "@/lib/auth-tokens"
 import { SIGNUP_GRANT_LEAVES } from "@/lib/task-constants"
 import { awardTask } from "@/lib/tasks"
 import type { PrismaClient } from "@/generated/prisma/client"
@@ -138,4 +139,24 @@ async function claimSignupGrant(userId: string, at: Date): Promise<number> {
 
     return SIGNUP_GRANT_LEAVES
   })
+}
+
+/**
+ * Google proved this person owns the address; the account it matched may not
+ * have. An unverified account with a password is one somebody registered by
+ * typing an email, never proving it -- possibly an attacker squatting on the
+ * victim's address before the victim ever arrived. Linking the Google sign-in
+ * to it as-is would leave the squatter's password working on the victim's
+ * account. So, before markVerified(): drop that password and end every session
+ * it opened. The real owner can set a new one from the profile screen.
+ *
+ * Called by both Google paths (web signIn callback, native /api/auth/google/token).
+ * A no-op on a verified account, which is every returning user.
+ */
+export async function claimUnverifiedForGoogle(userId: string): Promise<void> {
+  const cleared = await prisma.user.updateMany({
+    where: { id: userId, isVerified: false, password: { not: null } },
+    data: { password: null },
+  })
+  if (cleared.count > 0) await revokeUserFamilies(userId)
 }
