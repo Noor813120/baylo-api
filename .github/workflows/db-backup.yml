@@ -96,7 +96,10 @@ env:
 jobs:
   dump:
     name: pg_dump → verify → encrypt → artifact
-    runs-on: ubuntu-latest
+    # Pinned, not ubuntu-latest: that label moves to Ubuntu 26 from 19 Oct
+    # 2026, and the PGDG apt repo below may lag a brand-new release codename.
+    # Bump this deliberately once PGDG lists the new one.
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
 
     steps:
@@ -141,6 +144,14 @@ jobs:
             | sudo tee /etc/apt/sources.list.d/pgdg.list > /dev/null
           sudo apt-get update -qq
           sudo apt-get install -y -qq "postgresql-client-${PG_MAJOR}"
+
+          # The runner image ships PostgreSQL 16, and the bare `pg_dump` on
+          # PATH keeps resolving to it even after 17 is installed. Put the 17
+          # binaries first, here and (via GITHUB_PATH) in every later step,
+          # so pg_dump, pg_restore and psql all match the server.
+          pgbin="/usr/lib/postgresql/${PG_MAJOR}/bin"
+          echo "${pgbin}" >> "${GITHUB_PATH}"
+          export PATH="${pgbin}:${PATH}"
 
           actual="$(pg_dump --version | awk '{print $3}' | cut -d. -f1)"
           echo "pg_dump: $(pg_dump --version)"
