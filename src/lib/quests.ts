@@ -1,4 +1,5 @@
 import prisma from "@/lib/prisma"
+import { runInBackground } from "@/lib/background"
 
 /**
  * Daily quests: five a day -- 2 Easy, 2 Medium, 1 Hard -- refreshed every
@@ -352,11 +353,11 @@ export const TRADE_QUESTS: readonly QuestKind[] = [
  * row.
  */
 export function settleQuestsAsync(userId: string, kinds: readonly QuestKind[]): void {
-  void (async () => {
+  runInBackground((async () => {
     const user = await prisma.user.findUnique({ where: { id: userId }, select: { isOrgAccount: true } })
     if (!user || user.isOrgAccount) return
     await reconcileQuests(userId, new Date(), kinds)
   })().catch((err) => {
     console.error("[quests] event settle failed; GET /api/v1/quests will backfill", err)
-  })
+  }))
 }
