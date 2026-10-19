@@ -1,5 +1,6 @@
 import type { PrismaClient } from "@/generated/prisma/client"
 import prisma from "@/lib/prisma"
+import { runInBackground } from "@/lib/background"
 import {
   TASK_REWARDS,
   TASK_ORDER,
@@ -312,9 +313,9 @@ export function awardTaskAsync(
   refId = "",
   opts: { partnerId?: string; tradeId?: string; description?: string; tradeAt?: Date; eventAt?: Date } = {},
 ): void {
-  void prisma
+  runInBackground(prisma
     .$transaction((tx) => awardTask(tx as TaskDb, userId, task, refId, opts))
-    .catch(() => { /* awards are best-effort; the backfill catches misses */ })
+    .catch(() => { /* awards are best-effort; the backfill catches misses */ }))
 }
 
 // ── Backfill ─────────────────────────────────────────────────────────────────
