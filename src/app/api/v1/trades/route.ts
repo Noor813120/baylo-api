@@ -197,7 +197,7 @@ export async function GET(req: NextRequest) {
       id: true, offerStatus: true, offeredLeaves: true,
       bridgeFeeLeaves: true, offeredBracket: true, targetBracket: true,
       message: true, createdAt: true, senderId: true, receiverId: true,
-      offeredItem: { select: { id: true, title: true, valueLeaves: true } },
+      offeredItem: { select: { id: true, title: true, valueLeaves: true, images: ITEM_IMAGES } },
       requestedItem: { select: ITEM_BRIEF },
       sender: { select: USER_BRIEF },
       receiver: { select: USER_BRIEF },
@@ -333,10 +333,11 @@ export async function GET(req: NextRequest) {
     /*
      * `offeredItems` keeps its list shape on the wire, built from the real
      * relation (schema v2) where it used to be parsed out of a client-written
-     * JSON blob. `valueLeaves` comes from the Item row, as it always did.
-     * `image` stays null: the blob every offer since 16 Sep 2026 wrote held
-     * only `{ id, title }`, so null is what this field has always carried, and
-     * the app draws offered items from their own records.
+     * JSON blob. `valueLeaves` and `image` come from the Item row. `image` was
+     * hard-coded null until 19 Oct 2026, from when the blob held only
+     * `{ id, title }` -- but the app's offer cards (chat, Trades tab, the trade
+     * screen) DO draw this field, so every pending offer showed a grey
+     * placeholder for the offered item while the requested one had its photo.
      */
     const offeredItems: {
       id: string
@@ -344,7 +345,7 @@ export async function GET(req: NextRequest) {
       image: string | null
       valueLeaves: number | null
     }[] = o.offeredItem
-      ? [{ id: o.offeredItem.id, title: o.offeredItem.title, image: null, valueLeaves: o.offeredItem.valueLeaves }]
+      ? [{ id: o.offeredItem.id, title: o.offeredItem.title, image: firstImage(o.offeredItem.images), valueLeaves: o.offeredItem.valueLeaves }]
       : []
     return {
       id: o.id,
