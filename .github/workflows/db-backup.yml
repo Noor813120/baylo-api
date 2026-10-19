@@ -219,7 +219,12 @@ jobs:
           # asserts each one is genuinely absent, because a silent no-op here
           # is the kind of failure that surfaces in someone else's breach
           # report.
-          excluded=(RefreshToken PasswordResetToken EmailVerificationToken)
+          #
+          # Schema v2 merged the three v1 token tables (RefreshToken,
+          # PasswordResetToken, EmailVerificationToken) into AuthToken. The old
+          # names matched nothing after the cutover, so token rows were being
+          # dumped; the verify step now fails if a name here is not a live table.
+          excluded=(AuthToken)
           echo "EXCLUDED_COUNT=${#excluded[@]}" >> "$GITHUB_ENV"
           echo "EXCLUDED_NAMES=${excluded[*]}" >> "$GITHUB_ENV"
 
@@ -321,6 +326,13 @@ jobs:
             fi
           done < out/live-tables.txt
 
+          # An excluded name that is not a live table excludes nothing, and the
+          # loop above cannot notice: it only walks tables that exist.
+          for t in ${EXCLUDED_NAMES}; do
+            grep -qx "${t}" out/live-tables.txt \
+              || { echo "::error title=Excluded table not found::${t} is not a live table, so its exclusion does nothing -- update the excluded list"; exit 1; }
+          done
+
           if [ -n "${leaked}" ]; then
             echo "::error title=Excluded data present::${leaked} should have been excluded but carries row data -- check the --exclude-table-data quoting"
             exit 1
@@ -335,7 +347,7 @@ jobs:
           # somehow has the right count but not these is not a Baylo backup.
           # `( |$)` because --no-owner can leave the TOC line ending at the
           # table name, with no owner column after it to anchor a space on.
-          for t in User Item LeafTransaction UserAchievement TradeRequest; do
+          for t in User Item LeafTransaction UserProgress Trade; do
             grep -qE "TABLE DATA public ${t}( |$)" out/toc.txt \
               || { echo "::error title=Missing table::${t} is not in the dump"; exit 1; }
           done
