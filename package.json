@@ -12,6 +12,7 @@
     "build": "next build",
     "start": "next start",
     "start:lan": "next start -H 0.0.0.0",
+    "present": "next build && next start -H 0.0.0.0",
     "lint": "eslint",
     "seed": "tsx prisma/seed.ts"
   },
