@@ -41,17 +41,34 @@ export interface QueueCounts {
 }
 
 // `group` is the heading the item sits under; consecutive items share one.
-const LINKS: { href: string; label: string; icon: LucideIcon; group: string; queue?: keyof QueueCounts }[] = [
+// `exact`: active on its own URL only, never on a child route. Platform
+// reports needs it because the URL space is shared: /admin/reports is the
+// charts page, but /admin/reports/<id> is ONE USER REPORT, opened from the
+// User reports queue -- and without `exact` the longest-prefix match below lit
+// "Platform reports" on that page instead of "User reports".
+// `also`: other URLs that ARE this section. Anything unlisted falls through to
+// the "/admin" root, i.e. "User reports", which is how business documents and
+// the old /admin/anomalies URL lit the wrong item until 20 Oct 2026.
+const LINKS: {
+  href: string
+  label: string
+  icon: LucideIcon
+  group: string
+  queue?: keyof QueueCounts
+  exact?: boolean
+  also?: string[]
+}[] = [
   { href: "/admin/dashboard", label: "Overview", icon: LayoutGrid, group: "Insight" },
-  { href: "/admin/reports", label: "Platform reports", icon: ChartLine, group: "Insight" },
+  { href: "/admin/reports", label: "Platform reports", icon: ChartLine, group: "Insight", exact: true },
   { href: "/admin", label: "User reports", icon: Flag, group: "Queues", queue: "reports" },
   // Two queues behind one entry: government IDs and business documents,
   // switched by the tab strip on both pages. They are one job — "is this
   // document real" — with different retention rules and different
   // consequences, which is why they are separate routes rather than one
   // filtered list. See DocumentQueueTabs.
-  { href: "/admin/id-verification", label: "Documents", icon: IdCard, group: "Queues", queue: "documents" },
-  { href: "/admin/review-queue", label: "Review queue", icon: Scale, group: "Queues", queue: "reviewQueue" },
+  { href: "/admin/id-verification", label: "Documents", icon: IdCard, group: "Queues", queue: "documents", also: ["/admin/organizations"] },
+  // /admin/review-queue re-exports the /admin/anomalies page; both are this queue.
+  { href: "/admin/review-queue", label: "Review queue", icon: Scale, group: "Queues", queue: "reviewQueue", also: ["/admin/anomalies"] },
   { href: "/admin/appeals", label: "Appeals", icon: Gavel, group: "Queues", queue: "appeals" },
   { href: "/admin/users", label: "Users", icon: Users, group: "Manage" },
   { href: "/admin/listings", label: "Listings", icon: Package, group: "Manage" },
@@ -65,10 +82,15 @@ const LINKS: { href: string; label: string; icon: LucideIcon; group: string; que
 // Longest href first, so a nested route like /admin/id-verification/xyz
 // matches the specific "Documents" link before the "/admin" root link (which
 // would otherwise prefix-match everything under /admin).
-const BY_SPECIFICITY = [...LINKS].sort((a, b) => b.href.length - a.href.length)
+// Every URL a link answers to (its href and its `also`), longest first.
+const BY_SPECIFICITY = LINKS.flatMap((link) =>
+  [link.href, ...(link.also ?? [])].map((prefix) => ({ prefix, link })),
+).sort((a, b) => b.prefix.length - a.prefix.length)
 
 function findActive(pathname: string) {
-  return BY_SPECIFICITY.find((link) => pathname === link.href || pathname.startsWith(link.href + "/"))
+  return BY_SPECIFICITY.find(
+    ({ prefix, link }) => pathname === prefix || (!link.exact && pathname.startsWith(prefix + "/")),
+  )?.link
 }
 
 const RAIL_KEY = "baylo.adm.rail"
