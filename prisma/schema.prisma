@@ -52,6 +52,13 @@ model User {
   avatar      String?
   bio         String?  @db.Text
   location    String?
+
+  /// The Expo push token of the phone this account last signed in on, set by
+  /// POST /api/v1/push-token and cleared on sign-out or when Expo reports the
+  /// device gone. ONE PHONE PER ACCOUNT, deliberately: a column rather than a
+  /// device table, to keep the schema under its table budget. See @/lib/push.
+  pushToken   String?  @db.Text
+
   rating      Float    @default(0)
   totalTrades Int      @default(0)
   createdAt   DateTime @default(now())
