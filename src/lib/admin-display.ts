@@ -56,3 +56,15 @@ export function timeAgo(date: Date): string {
   if (Math.abs(hours) < 24) return relative.format(hours, "hour")
   return relative.format(Math.round(hours / 24), "day")
 }
+
+/**
+ * A square Cloudinary thumbnail, `px` on a side, for admin tables. Only public
+ * `image/upload/v<n>/` URLs are rewritten -- every URL /api/upload returns;
+ * anything else (seed photos, an already-transformed URL) is used as it is.
+ */
+export function adminThumb(url: string, px: number): string {
+  return url.replace(
+    /^(https:\/\/res\.cloudinary\.com\/[^/]+\/image\/upload\/)(v\d+\/)/,
+    `$1w_${px},h_${px},c_fill,q_auto,f_auto/$2`,
+  )
+}
