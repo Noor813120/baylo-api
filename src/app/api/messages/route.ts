@@ -60,6 +60,21 @@ export async function GET(req: NextRequest) {
       where: { senderId: partnerId, receiverId: inboxId, read: false },
       data: { read: true },
     })
+    // The bell's "sent you a message" / "made you an offer" row for this
+    // conversation is read too: opening the chat IS reading it. Until 20 Oct
+    // 2026 only the messages were marked, so the bell kept counting a chat the
+    // person had already read. Scoped to the messages link, so a comment on a
+    // listing (also NEW_MESSAGE, linked to the item) is left alone.
+    await prisma.notification.updateMany({
+      where: {
+        userId: inboxId,
+        actorId: partnerId,
+        type: "NEW_MESSAGE",
+        read: false,
+        link: { startsWith: "/dashboard/messages" },
+      },
+      data: { read: true },
+    })
 
     return NextResponse.json(messages)
   } catch {
