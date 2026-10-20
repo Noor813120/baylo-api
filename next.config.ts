@@ -19,7 +19,10 @@ const CSP = [
   "form-action 'self'",
   `script-src 'self' 'unsafe-inline'${process.env.NODE_ENV === "production" ? "" : " 'unsafe-eval'"}`,
   "style-src 'self' 'unsafe-inline' https://unpkg.com",
-  "img-src 'self' data: blob: https://res.cloudinary.com https://lh3.googleusercontent.com https://*.tile.openstreetmap.org https://unpkg.com",
+  // images.unsplash.com: the 11 seeded demo listings use Unsplash photos, and
+  // without it the admin listing pages drew them as broken images (20 Oct 2026).
+  // Images only; the phone app is not subject to this header.
+  "img-src 'self' data: blob: https://res.cloudinary.com https://lh3.googleusercontent.com https://images.unsplash.com https://*.tile.openstreetmap.org https://unpkg.com",
   "media-src 'self' blob: https://res.cloudinary.com",
   "font-src 'self' data:",
   "connect-src 'self' https://res.cloudinary.com https://*.pusher.com wss://*.pusher.com https://nominatim.openstreetmap.org",
