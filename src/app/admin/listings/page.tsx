@@ -6,10 +6,12 @@ import { valueCap } from "@/lib/trade-rules"
 import { VALUE_REJECTION_REASONS } from "@/lib/value-rejection"
 import { categoryLabel } from "@/lib/v1/taxonomy"
 import ListingActions from "./ListingActions"
+import { moderationLabel } from "./moderation-label"
 import { TakedownDisclosure } from "./TakedownDisclosure"
 import { FilterChips } from "@/components/admin/FilterChips"
 import { StaggerGroup, StaggerItem } from "@/components/admin/Stagger"
 import UrlSyncedForm from "@/components/admin/primitives/UrlSyncedForm"
+import { adminThumb } from "@/lib/admin-display"
 
 export const dynamic = "force-dynamic"
 export const revalidate = 0
@@ -22,21 +24,6 @@ const STATUSES = ["available", "pending_review", "value_rejected", "in_trade", "
 type StatusFilter = (typeof STATUSES)[number]
 type ItemStatus = "AVAILABLE" | "IN_TRADE" | "TRADED" | "OWNED" | "REMOVED" | "PENDING_REVIEW" | "VALUE_REJECTED"
 
-/**
- * The Moderation column, in words that say who the listing is waiting on.
- *
- * "Visible" used to be the answer for anything not hidden, which on a
- * PENDING_REVIEW row was a lie: nobody but the owner could see it. Hidden
- * wins over the review states because it is the one an owner cannot undo by
- * editing.
- */
-function moderationLabel(status: string, hidden: boolean): { text: string; color: string } {
-  if (hidden) return { text: "Hidden", color: "var(--adm-warn)" }
-  if (status === "PENDING_REVIEW") return { text: "Waiting for review", color: "var(--adm-queue)" }
-  if (status === "VALUE_REJECTED") return { text: "Value rejected — owner choosing", color: "var(--adm-warn)" }
-  if (status === "AVAILABLE") return { text: "Visible", color: "var(--adm-good)" }
-  return { text: "Not listed", color: "var(--adm-text-secondary)" }
-}
 
 
 export default async function ListingsPage({ searchParams }: Props) {
@@ -66,6 +53,7 @@ export default async function ListingsPage({ searchParams }: Props) {
       id: true, title: true, category: true, status: true, moderationHiddenAt: true, valueRejectionReason: true,
       createdAt: true, valueLeaves: true, suggestedLeaves: true, valueSetByUser: true,
       user: { select: { id: true, name: true, email: true } },
+      images: { select: { url: true }, orderBy: { position: "asc" }, take: 1 },
     },
     orderBy: [{ createdAt: "desc" }, { id: "desc" }],
     take: 100,
@@ -131,7 +119,30 @@ export default async function ListingsPage({ searchParams }: Props) {
                     style={{ borderTop: "1px solid var(--adm-border)", verticalAlign: "top" }}
                   >
                     <td style={{ padding: "14px" }}>
-                      <Link href={`/listings/${listing.id}`} style={{ color: "var(--adm-good)", fontWeight: 700 }}>{listing.title}</Link>
+                      <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
+                      {/*
+                        The admin detail page, NOT /listings/<id>: that is the
+                        retired user web app, whose guard sends every admin to
+                        /admin/dashboard -- which is how clicking a listing here
+                        used to land on Overview.
+                      */}
+                      <Link href={`/admin/listings/${listing.id}`} aria-hidden tabIndex={-1} style={{ flexShrink: 0 }}>
+                        {listing.images[0] ? (
+                          // eslint-disable-next-line @next/next/no-img-element
+                          <img
+                            src={adminThumb(listing.images[0].url, 96)}
+                            alt=""
+                            width={48}
+                            height={48}
+                            loading="lazy"
+                            style={{ width: 48, height: 48, borderRadius: 8, objectFit: "cover", display: "block", border: "1px solid var(--adm-border)" }}
+                          />
+                        ) : (
+                          <div style={{ width: 48, height: 48, borderRadius: 8, background: "var(--adm-border)" }} />
+                        )}
+                      </Link>
+                      <div>
+                      <Link href={`/admin/listings/${listing.id}`} style={{ color: "var(--adm-good)", fontWeight: 700 }}>{listing.title}</Link>
                       {/*
                         BOTH numbers, always. The one the model suggested and the
                         one the owner listed at are different facts, and the gap
@@ -157,6 +168,8 @@ export default async function ListingsPage({ searchParams }: Props) {
                           rejected: {VALUE_REJECTION_REASONS[listing.valueRejectionReason]?.label ?? listing.valueRejectionReason}
                         </div>
                       ) : null}
+                      </div>
+                      </div>
                     </td>
                     <td style={{ padding: "14px", whiteSpace: "nowrap" }}>{categoryLabel(listing.category)}</td>
                     <td style={{ padding: "14px" }}>
