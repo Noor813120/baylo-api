@@ -62,7 +62,7 @@ export interface PushMessage {
   body: string
   sound: "default"
   priority: "high"
-  channelId: "default"
+  channelId: "alerts"
   data: { notificationId: string; type: string; link: string | null; entityType: string | null; entityId: string | null; actorId: string | null }
 }
 
@@ -94,7 +94,7 @@ export function buildPushMessages(
       body,
       sound: "default",
       priority: "high",
-      channelId: "default",
+      channelId: "alerts",
       data: {
         notificationId: row.id,
         type: row.type,

@@ -25,7 +25,7 @@ export const OPERATOR_NAME = "LoomLoop Labs"
  * to false, and fill in POLICY_EFFECTIVE_DATE, only once they have been
  * reviewed and approved.
  */
-export const POLICY_IS_DRAFT = true
+export const POLICY_IS_DRAFT = false
 
 /** Shown as "Effective <date>" once POLICY_IS_DRAFT is false. */
-export const POLICY_EFFECTIVE_DATE = "—"
+export const POLICY_EFFECTIVE_DATE = "21 October 2026"
