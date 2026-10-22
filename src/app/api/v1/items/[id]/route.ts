@@ -1,5 +1,5 @@
 import { NextRequest } from "next/server"
-import { bracketOf, valueNeedsPremium, valueNeedsVip } from "@/lib/brackets"
+import { bracketOf, valueNeedsPremium } from "@/lib/brackets"
 import { valueCap } from "@/lib/trade-rules"
 import { valueRejectionSentence } from "@/lib/value-rejection"
 import { ownerAppealState } from "@/lib/appeals"
@@ -251,11 +251,10 @@ export async function GET(
       // An owner cannot offer on their own listing, and neither can anyone once
       // it has left AVAILABLE.
       canOffer: !isOwner && item.status === "AVAILABLE",
-      // Why the offer control is LOCKED for this viewer, when it is. "vip": the
-      // listing sits in VIP_MIN_BRACKET or above and the viewer has no live VIP
-      // subscription (Premium alone does not clear this one). "premium": the
-      // listing sits in PREMIUM_MIN_BRACKET or above and the viewer has neither
-      // subscription live. Sent as a reason rather than folded into `canOffer`
+      // Why the offer control is LOCKED for this viewer, when it is. "premium":
+      // the listing sits in PREMIUM_MIN_BRACKET or above and the viewer has
+      // neither Premium nor VIP live. "vip" is no longer sent: there is no
+      // VIP-only bracket since 22 Oct 2026. Sent as a reason rather than folded into `canOffer`
       // because the two draw different controls -- `canOffer: false` is an
       // inert button ("not available"), a lock is an explanation with the
       // listing left fully in view. Advisory: the same check, in the same
@@ -265,14 +264,12 @@ export async function GET(
       // whatever bracket it is in, and a padlock on your own item would read as
       // a claim about you.
       offerLock:
-        !isOwner && valueNeedsVip(item.valueLeaves) && !isVip(vipUntil(viewerRow?.subscriptions))
-          ? ("vip" as const)
-          : !isOwner &&
-              valueNeedsPremium(item.valueLeaves) &&
-              !isPremium(premiumUntil(viewerRow?.subscriptions)) &&
-              !isVip(vipUntil(viewerRow?.subscriptions))
-            ? ("premium" as const)
-            : null,
+        !isOwner &&
+        valueNeedsPremium(item.valueLeaves) &&
+        !isPremium(premiumUntil(viewerRow?.subscriptions)) &&
+        !isVip(vipUntil(viewerRow?.subscriptions))
+          ? ("premium" as const)
+          : null,
       leaves: viewerRow?.leaves ?? 0,
       tradeableItems: tradeable.map((t) => ({
         id: t.id,
