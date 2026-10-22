@@ -65,7 +65,7 @@ check("data for routing", JSON.stringify(msg?.data) === JSON.stringify({
   notificationId: "n1", type: "NEW_MESSAGE", link: "/dashboard/messages?partner=u2",
   entityType: "conversation", entityId: "u2", actorId: "u2",
 }), JSON.stringify(msg?.data))
-check("android channel + sound", msg?.channelId === "default" && msg?.sound === "default" && msg?.priority === "high")
+check("android channel + sound", msg?.channelId === "alerts" && msg?.sound === "default" && msg?.priority === "high")
 
 // 5
 const two = buildPushMessages([row({}), row({ id: "n2", userId: "owner" })], tokens, noShops)
