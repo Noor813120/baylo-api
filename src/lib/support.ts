@@ -7,11 +7,11 @@
  */
 
 /**
- * The address on the public site footer (SiteFooter.tsx). CONFIRM THE MAILBOX
- * EXISTS AND IS READ before the Play Store release: every "contact support"
- * in the app ends here.
+ * The address on the public site footer (SiteFooter.tsx), the trust page and
+ * the /policy pages. The team Gmail, created 22 Oct 2026 and checked daily:
+ * every "contact support" and every Play deletion request ends here.
  */
-export const SUPPORT_EMAIL = "hello@baylo.ph"
+export const SUPPORT_EMAIL = "bayloplatform@gmail.com"
 
 /** The team that runs Baylo, as the pages name it. */
 export const OPERATOR_NAME = "LoomLoop Labs"
