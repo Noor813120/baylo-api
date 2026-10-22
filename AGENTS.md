@@ -17,7 +17,7 @@ The defense server runs `integration/defense` in BOTH repos (this API and baylo-
 
 ## Schema freeze until the defense (since 11 Oct 2026)
 
-The database stays at **28 tables + 1 view** (`ItemWantedCategorySummary`). NO new tables, views or columns, and no new migration folder after `20261008100000_item_wanted_category_summary_view`.
+The database stays at **28 tables + 1 view** (`ItemWantedCategorySummary`). NO new tables, views or columns, and no new migration folder after `20261020000000_user_push_token` (the one approved exception, 20 Oct 2026).
 
 - If a fix seems to need a schema change, STOP and tell the owner first. Find a way without one.
 - `npx tsx scripts/verify-schema-freeze.ts` fails if `prisma/schema.prisma` has more or fewer than 28 models, gains a `view` block or a field, or if a migration folder appears after that one. Run it before every commit that touches `prisma/`.

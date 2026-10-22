@@ -685,7 +685,7 @@ export default function PostWizard({ onClose, onPosted, initialItem, me }: Props
               Confirm the details
             </p>
             <p className="pw2-ident-info">
-              We analyzed your photo's colors, shape and setting. Confirm the item so buyers
+              We analyzed your photo&apos;s colors, shape and setting. Confirm the item so buyers
               can find it and we can value it accurately.
             </p>
             {identifying ? (

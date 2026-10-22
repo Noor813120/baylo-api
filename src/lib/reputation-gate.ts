@@ -2,7 +2,7 @@ import { NextResponse } from "next/server"
 import prisma from "@/lib/prisma"
 import { getTrustTier, getTierLimits, type TrustTier, type TierLimits } from "@/lib/reputation"
 import {
-  bracketOf, bracketRange, PREMIUM_MIN_BRACKET, VIP_MIN_BRACKET, valueNeedsPremium, valueNeedsVip,
+  bracketOf, bracketRange, PREMIUM_MIN_BRACKET, valueNeedsPremium,
 } from "@/lib/brackets"
 import { isLifetimePremium, isPremium, isVip, premiumUntil, vipUntil, SUBSCRIPTION_SELECT } from "@/lib/premium"
 
@@ -122,12 +122,12 @@ function forbidden(message: string, extra: Record<string, unknown> = {}) {
   return NextResponse.json({ error: message, ...extra }, { status: 403 })
 }
 
-// ── The premium/VIP bracket gate ─────────────────────────────────────────────
+// ── The premium bracket gate ─────────────────────────────────────────────────
 
 /**
  * Refuses a non-subscriber ACQUIRING an item in bracket PREMIUM_MIN_BRACKET or
- * above -- on either path -- and, within that range, refuses a Premium-only
- * subscriber an item at VIP_MIN_BRACKET or above.
+ * above -- on either path. A live Premium or VIP subscription clears it; there
+ * is no VIP-only bracket since 22 Oct 2026 (see @/lib/brackets).
  *
  * Both paths, for the same reason the tier cap runs on both: it is a rule
  * about what a person takes in, and a rule that only bound proposers would be
@@ -139,14 +139,6 @@ function forbidden(message: string, extra: Record<string, unknown> = {}) {
  * gated belongs to the side that receives it. (Until 11 Sep 2026 this was
  * propose-only, with the accept side left open as "a toll on selling"; that
  * reading missed that the acceptor is also the one receiving.)
- *
- * VIP checked FIRST, ahead of premium. VIP_MIN_BRACKET sits inside the range
- * PREMIUM_MIN_BRACKET already covers, so a bracket-9 item is caught by
- * `valueNeedsPremium` too -- checking premium first would tell a Premium-only
- * subscriber they are refused for lacking premium on an item premium was
- * never going to unlock, which is not what happened. A live VIP subscription
- * short-circuits the whole function, since VIP passes every premium bracket
- * as well.
  *
  * Ordered BEFORE the tier cap, deliberately. The lock is a property of the
  * ITEM -- everyone sees the same padlock on the same tile -- while the tier cap
@@ -170,31 +162,12 @@ export async function enforcePremiumForListing(
 ): Promise<NextResponse | null> {
   const ids = itemIds.filter(Boolean)
   if (ids.length === 0) return null
-  if (standing.vip) return null
+  if (standing.vip || standing.premium) return null
 
   const rows = await prisma.item.findMany({
     where: { id: { in: ids } },
     select: { id: true, title: true, valueLeaves: true },
   })
-
-  const vipGated = rows.find((r) => valueNeedsVip(r.valueLeaves))
-  if (vipGated) {
-    const lead =
-      `Trading at bracket ${VIP_MIN_BRACKET} and above needs a VIP subscription, ` +
-      `which is coming soon. `
-    const tail =
-      path === "accept"
-        ? `"${vipGated.title}" is in that bracket, so accepting it is locked. The offer stays where it is.`
-        : `"${vipGated.title}" stays visible; only proposing on it is locked.`
-    return forbidden(lead + tail, {
-      code: "VIP_REQUIRED",
-      bracket: bracketOf(vipGated.valueLeaves as number),
-      minBracket: VIP_MIN_BRACKET,
-      path,
-    })
-  }
-
-  if (standing.premium) return null
 
   const gated = rows.find((r) => valueNeedsPremium(r.valueLeaves))
   if (!gated) return null

@@ -5,6 +5,8 @@ import { REPORT } from "@/lib/report-case"
 import { IN_TRADE_PHASE } from "@/lib/trade-row"
 import { suspensionState, activeSuspension, notSuspendedWhere, suspendedWhere } from "@/lib/moderation"
 import UserActions from "./UserActions"
+import PremiumToggle from "./PremiumToggle"
+import { isLifetimePremium, isPremium, isVip, premiumUntil, vipUntil, SUBSCRIPTION_SELECT } from "@/lib/premium"
 import { FilterChips } from "@/components/admin/FilterChips"
 import { StaggerGroup, StaggerItem } from "@/components/admin/Stagger"
 import UrlSyncedForm from "@/components/admin/primitives/UrlSyncedForm"
@@ -84,6 +86,7 @@ export default async function UsersPage({ searchParams }: Props) {
       id: true, name: true, email: true, role: true, isVerified: true,
       idVerifiedGrandfatheredAt: true, createdAt: true, suspensions: activeSuspension(now),
       deletedAt: true,
+      subscriptions: SUBSCRIPTION_SELECT,
       _count: { select: { items: true, casesFiled: { where: REPORT }, idVerifications: true, sentTrades: { where: IN_TRADE_PHASE }, receivedTrades: { where: IN_TRADE_PHASE } } },
       idVerifications: {
         select: { status: true, submittedAt: true },
@@ -162,6 +165,9 @@ export default async function UsersPage({ searchParams }: Props) {
             <StaggerGroup as="tbody">
               {users.map((user, index) => {
                 const suspension = suspensionState(user)
+                const premiumEnds = premiumUntil(user.subscriptions)
+                const premium = isPremium(premiumEnds, now)
+                const vip = isVip(vipUntil(user.subscriptions), now)
                 return (
                   <StaggerItem
                     as="tr"
@@ -181,6 +187,14 @@ export default async function UsersPage({ searchParams }: Props) {
                         {user.deletedAt ? "Deleted" : suspension.suspended ? "Suspended" : "Active"}
                       </div>
                       {user.isVerified && <div style={{ color: "var(--adm-text-muted)", fontSize: 11, marginTop: 3 }}>Email verified</div>}
+                      <div style={{ color: premium || vip ? "var(--adm-good)" : "var(--adm-text-muted)", fontSize: 11, marginTop: 3 }}>
+                        {vip
+                          ? "VIP"
+                          : premium
+                            ? isLifetimePremium(premiumEnds) ? "Premium · lifetime" : `Premium until ${premiumEnds!.toLocaleDateString()}`
+                            : "Free"}
+                      </div>
+                      {canSuspend && !user.deletedAt && <PremiumToggle userId={user.id} premium={premium} />}
                     </td>
                     <td style={{ padding: "14px" }}>
                       {idStatus(user)}
