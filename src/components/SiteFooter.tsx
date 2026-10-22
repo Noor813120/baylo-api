@@ -1,6 +1,6 @@
 import Link from "next/link"
 import Image from "next/image"
-import { SUPPORT_EMAIL } from "@/lib/support"
+import { OPERATOR_NAME, SUPPORT_EMAIL } from "@/lib/support"
 
 function ArrowIcon() {
   return (
@@ -71,7 +71,7 @@ export default function SiteFooter() {
 
       <div className="wrap">
         <div className="footer-bottom">
-          <span>© 2026 Baylo Labs · Toward a local circular economy</span>
+          <span>© 2026 {OPERATOR_NAME} · Toward a local circular economy</span>
           <div className="legal">
             <Link href="/privacy">Privacy</Link>
             <Link href="/terms">Terms</Link>
