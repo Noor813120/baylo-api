@@ -247,7 +247,9 @@ export async function GET(
           ? "IN_TRADE"
           : item.status === "TRADED"
             ? "TRADED"
-            : "SEND_OFFER",
+            : item.status === "AVAILABLE"
+              ? "SEND_OFFER"
+              : "UNAVAILABLE",
       // An owner cannot offer on their own listing, and neither can anyone once
       // it has left AVAILABLE.
       canOffer: !isOwner && item.status === "AVAILABLE",
