@@ -9,10 +9,10 @@ import { ORG_CONTEXT_HEADER, resolveActingIdentity, type ActingIdentity } from "
  * ── A SHOP'S INBOX IS ITS BACKING ROW'S ─────────────────────────────────────
  *
  * Messaging a shop writes an ordinary Message with `receiverId` = the org's
- * backing User row, and a NEW_MESSAGE notification to that row. The backing
- * account cannot sign in, so until this module every one of those rows was
- * stored and unreachable: /api/messages, the conversation list and the bell all
- * keyed on `session.user.id` and nothing else.
+ * backing User row. Offers can also write a NEW_MESSAGE notification there.
+ * The backing account cannot sign in, so until this module /api/messages, the
+ * conversation list and the bell all keyed on `session.user.id` and nothing
+ * else.
  *
  * Acting as a shop (X-Baylo-Org, re-checked against an ACTIVE membership by
  * resolveActingIdentity() on every request), the inbox IS the backing row:
@@ -73,9 +73,6 @@ export async function resolveInbox(
  * AN ALLOWLIST AND NOT A DENYLIST, so a notification type added later is kept
  * out of the shop's bell until somebody has checked its destination as a shop.
  *
- *   IN   NEW_MESSAGE, entityType null   a direct message. Opens the thread,
- *                                       which is the shop's inbox and replies
- *                                       as the shop.
  *   IN   FOLLOW_REQUEST                 "started following you" (follows are
  *                                       ACCEPTED at once). Opens the follower's
  *                                       profile, which is all the row is about.
@@ -127,9 +124,8 @@ export async function resolveInbox(
  *   --   ID_*, ORG_INVITE, REPORT_*,    addressed to people, never to a backing
  *        FOLLOW_ACCEPTED, org review    row, so there is nothing to filter.
  *
- * `entityType: null` IS precise for direct messages on a shop: POST
- * /api/messages writes none, and the pre-v1 backfill that gave old message
- * rows a "conversation" pair predates every organisation.
+ * Direct-message notifications are excluded from the bell; offer notifications
+ * use entityType "conversation" and remain visible.
  *
  * Returned as ONE clause for an `AND`, never spread: the keyset cursor's
  * olderThan() is an `OR` too, and spreading both would drop one of them.
@@ -137,7 +133,6 @@ export async function resolveInbox(
 export function shopBellWhere(): Prisma.NotificationWhereInput {
   return {
     OR: [
-      { type: "NEW_MESSAGE", entityType: null },
       { type: "NEW_MESSAGE", entityType: "conversation" },
       { type: "FOLLOW_REQUEST" },
       { type: "TRADE_REQUEST" },
@@ -148,6 +143,11 @@ export function shopBellWhere(): Prisma.NotificationWhereInput {
       { type: "NEW_REVIEW" },
     ],
   }
+}
+
+/** Ordinary chat messages live in Messages, not in notification history. */
+export function excludeDirectMessageNotifications(): Prisma.NotificationWhereInput {
+  return { NOT: { type: "NEW_MESSAGE", message: "sent you a message" } }
 }
 
 /** The pre-v1 routes' refusal. Same code the v1 envelope carries. */

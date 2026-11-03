@@ -14,7 +14,7 @@ import { V1_ITEM_SELECT, V1_ITEM_OWNER_SELECT, v1ItemStatsSelect, v1Item, type V
 import { categoryLabel, categoryHashtag, type Category } from "@/lib/v1/taxonomy"
 import { sharedCategories, matchReason } from "@/lib/category-match"
 import { ORG_CONTEXT_HEADER, notAnOrgWhere, resolveActingIdentity } from "@/lib/organizations"
-import { shopBellWhere } from "@/lib/inbox"
+import { excludeDirectMessageNotifications, shopBellWhere } from "@/lib/inbox"
 import { expirePerishableItems } from "@/lib/perishable"
 
 export const dynamic = "force-dynamic"
@@ -206,7 +206,12 @@ export async function GET(req: NextRequest) {
       }),
       // A shop's bell counts only the types it lists. See shopBellWhere().
       prisma.notification.count({
-        where: { userId: inboxId, read: false, AND: acting ? [shopBellWhere()] : [] },
+        where: {
+          userId: inboxId,
+          read: false,
+          ...excludeDirectMessageNotifications(),
+          AND: acting ? [shopBellWhere()] : [],
+        },
       }),
     ])
   }

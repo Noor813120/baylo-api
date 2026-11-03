@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { resolveSession } from "@/lib/api-auth"
 import prisma from "@/lib/prisma"
-import { legacyOrgRefusal, resolveInbox, shopBellWhere } from "@/lib/inbox"
+import { excludeDirectMessageNotifications, legacyOrgRefusal, resolveInbox, shopBellWhere } from "@/lib/inbox"
 
 // Mark all unread notifications as read for the current inbox -- the person's,
 // or the shop's while acting as it. See @/lib/inbox. A shop marks only what
@@ -18,6 +18,7 @@ export async function PATCH(req: NextRequest) {
     where: {
       userId: inbox.inboxId,
       read: false,
+      ...excludeDirectMessageNotifications(),
       AND: inbox.acting.organization ? [shopBellWhere()] : [],
     },
     data: { read: true },

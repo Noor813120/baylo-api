@@ -60,10 +60,8 @@ export async function GET(req: NextRequest) {
       where: { senderId: partnerId, receiverId: inboxId, read: false },
       data: { read: true },
     })
-    // The bell's "sent you a message" / "made you an offer" row for this
-    // conversation is read too: opening the chat IS reading it. Until 20 Oct
-    // 2026 only the messages were marked, so the bell kept counting a chat the
-    // person had already read. Scoped to the messages link, so a comment on a
+    // An offer notification for this conversation is read too: opening the
+    // chat IS reading it. Scoped to the messages link, so a comment on a
     // listing (also NEW_MESSAGE, linked to the item) is left alone.
     await prisma.notification.updateMany({
       where: {
@@ -146,17 +144,15 @@ export async function POST(req: NextRequest) {
       })
     })
 
-    await prisma.notification.deleteMany({
-      where: { userId: receiverId, actorId: senderId, type: "NEW_MESSAGE", read: false },
-    })
-    await prisma.notification.create({
-      data: {
+    await prisma.notification.updateMany({
+      where: {
         userId: receiverId,
+        actorId: senderId,
         type: "NEW_MESSAGE",
         message: "sent you a message",
-        link: `/dashboard/messages?partner=${senderId}`,
-        actorId: senderId,
+        read: false,
       },
+      data: { read: true },
     })
 
     // The backing row carries the shop's name and its logo in `avatar`; the
