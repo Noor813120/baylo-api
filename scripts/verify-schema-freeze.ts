@@ -23,11 +23,15 @@ const ROOT = join(__dirname, "..")
 const MODEL_COUNT = 28
 // Re-pinned 22 Oct 2026 for 20261020000000_user_push_token (User.pushToken),
 // approved by the team and applied to live on 20 Oct 2026.
-const LAST_MIGRATION = "20261020000000_user_push_token"
-const MIGRATION_FOLDERS = 38
+// 20261104000000_chat_reply_mute_clear: the owner approved new COLUMNS (not
+// tables) on 4 Nov 2026 for swipe to reply, mute and delete chat --
+// Message.replyToId (+ its relation fields) and User.mutedChatUserIds /
+// User.clearedChats. Still 28 tables + 1 view.
+const LAST_MIGRATION = "20261104000000_chat_reply_mute_clear"
+const MIGRATION_FOLDERS = 39
 const FIELDS: Record<string, number> = {
-  User: 52, Subscription: 7, Suspension: 8, Follow: 8, AuthToken: 10, Item: 36,
-  ItemImage: 5, ItemWantedCategory: 4, Category: 5, Trade: 35, Message: 11,
+  User: 54, Subscription: 7, Suspension: 8, Follow: 8, AuthToken: 10, Item: 36,
+  ItemImage: 5, ItemWantedCategory: 4, Category: 5, Trade: 35, Message: 14,
   Notification: 12, Review: 10, SwapCode: 11, Like: 6, Comment: 10,
   LeafTransaction: 12, ModerationCase: 22, Block: 6, IdVerification: 18,
   AdminAction: 12, SafeZoneHub: 13, ItemSafeZone: 5, Achievement: 14,

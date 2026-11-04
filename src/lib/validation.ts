@@ -537,6 +537,8 @@ export const createMessageSchema = z.object({
   receiverId: z.string().min(1).max(64),
   content: text(MAX_MESSAGE),
   tradeId: z.string().min(1).max(64).nullish(),
+  /** The message this one answers (swipe to reply). Must be in the same chat. */
+  replyToId: z.string().min(1).max(64).nullish(),
 })
 
 export const typingSchema = z.object({ receiverId: z.string().min(1).max(64) })

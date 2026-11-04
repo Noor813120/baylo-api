@@ -5,6 +5,7 @@ import { resolveSession } from "@/lib/api-auth"
 import prisma from "@/lib/prisma"
 import { ok, fail, unauthenticated, invalid } from "@/lib/v1/envelope"
 import { resolveInbox } from "@/lib/inbox"
+import { clearedAt } from "@/lib/chat-prefs"
 import { parseQuery, paginationShape } from "@/lib/v1/query"
 import { decodeCursor, encodeCursor, cursorDate } from "@/lib/v1/cursor"
 
@@ -105,8 +106,16 @@ export async function GET(req: NextRequest) {
   `
 
   const hasMore = threads.length > limit
-  const pageThreads = hasMore ? threads.slice(0, limit) : threads
-  const lastRow = pageThreads[pageThreads.length - 1]
+  // "Delete chat": a thread whose newest message is not after the cleared time
+  // is gone from this account's list until someone writes again.
+  const me = await prisma.user.findUnique({ where: { id: viewerId }, select: { clearedChats: true } })
+  const pageAll = hasMore ? threads.slice(0, limit) : threads
+  const pageThreads = pageAll.filter((t) => {
+    const at = clearedAt(me?.clearedChats, t.partnerId)
+    return !at || new Date(t.lastAt) > at
+  })
+  // The cursor follows the UNFILTERED page, so hidden threads never end paging early.
+  const lastRow = pageAll[pageAll.length - 1]
   const nextCursor =
     hasMore && lastRow ? encodeCursor(new Date(lastRow.lastAt), lastRow.partnerId) : null
 

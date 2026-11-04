@@ -108,6 +108,24 @@ export function buildPushMessages(
   return out
 }
 
+/**
+ * Pure: drops chat-message rows from people the recipient muted (Chat info >
+ * Mute). Only NEW_MESSAGE: muting a person quiets their chat, not offers or
+ * trades with them. For a shop's inbox the OWNER's mute list applies, since
+ * the owner's phone is the one that would buzz.
+ */
+export function withoutMuted(
+  rows: PushRow[],
+  muted: Map<string, Set<string>>,
+  shops: Map<string, { ownerId: string; name: string }>,
+): PushRow[] {
+  return rows.filter((row) => {
+    if (row.type !== "NEW_MESSAGE" || !row.actorId) return true
+    const phoneOwner = shops.get(row.userId)?.ownerId ?? row.userId
+    return !muted.get(phoneOwner)?.has(row.actorId)
+  })
+}
+
 /** Pure: the tokens Expo says are no longer installed, to forget. */
 export function deadTokens(messages: PushMessage[], tickets: unknown): string[] {
   if (!Array.isArray(tickets)) return []
@@ -181,11 +199,12 @@ async function sendFor(where: Record<string, unknown>): Promise<void> {
   const people = [...new Set([...recipientIds, ...orgs.map((o) => o.ownerId)])]
   const users = await prisma.user.findMany({
     where: { id: { in: people }, pushToken: { not: null } },
-    select: { id: true, pushToken: true },
+    select: { id: true, pushToken: true, mutedChatUserIds: true },
   })
   const tokens = new Map(users.map((u) => [u.id, u.pushToken as string]))
+  const muted = new Map(users.map((u) => [u.id, new Set(u.mutedChatUserIds)]))
 
-  const messages = buildPushMessages(rows, tokens, shops)
+  const messages = buildPushMessages(withoutMuted(rows, muted, shops), tokens, shops)
   for (let i = 0; i < messages.length; i += BATCH) {
     const batch = messages.slice(i, i + BATCH)
     const res = await fetch(EXPO_PUSH_URL, {
