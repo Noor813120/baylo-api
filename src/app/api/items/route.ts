@@ -11,7 +11,8 @@ import { createItemSchema, parseBody, categorySchema } from "@/lib/validation"
 import { imageHashRows } from "@/lib/image-hashes"
 import { itemImagesCreate } from "@/lib/item-images"
 import { wantedCategoriesCreate } from "@/lib/wanted-categories"
-import { decideItemValue, reviewNotice } from "@/lib/valuation-server"
+import { decideItemValue, reviewNotice, type FixedSuggestion } from "@/lib/valuation-server"
+import { AI_VALUATION_SOURCE, TICKET_FAILURE_MESSAGES, verifyTicket } from "@/lib/ai-valuation"
 import { visibleItemWhere } from "@/lib/blocking"
 import { enforceIdVerifiedLegacy, isIdVerified } from "@/lib/id-verification"
 import {
@@ -220,7 +221,40 @@ export async function POST(req: NextRequest) {
     // A listing with no value takes the suggestion, so `suggestedLeaves` and
     // `valueLeaves` are both populated on every listing created from here and
     // the divergence between them is measurable.
-    const valued = await decideItemValue(body.category, body.condition, body.valueLeaves)
+    //
+    // AI-ASSISTED VALUES (Nov 2026). When the wizard showed an AI suggestion it
+    // sends the signed ticket that came with it, and the suggestion inside the
+    // ticket is what the value is judged against — the number the owner saw,
+    // not a fresh deterministic one that would disagree with it. A ticket that
+    // does not verify is a 409, not a silent fallback: creating the listing on
+    // the deterministic number would save a suggestion the owner was never
+    // shown. The client re-values and tries again.
+    let fixed: FixedSuggestion | undefined
+    if (body.valuationTicket) {
+      const checked = verifyTicket(body.valuationTicket, {
+        userId: session.user.id,
+        title: resolvedTitle,
+        category: body.category,
+        condition: body.condition,
+      })
+      if (!checked.ok) {
+        return NextResponse.json(
+          {
+            error: TICKET_FAILURE_MESSAGES[checked.reason],
+            code: "VALUATION_TICKET_INVALID",
+            reason: checked.reason,
+          },
+          { status: 409 },
+        )
+      }
+      fixed = {
+        suggestedLeaves: checked.suggestedLeaves,
+        min: checked.min,
+        max: checked.max,
+        valuationSource: AI_VALUATION_SOURCE,
+      }
+    }
+    const valued = await decideItemValue(body.category, body.condition, body.valueLeaves, fixed)
 
     // ── The perishable rule ─────────────────────────────────────────────────
     //

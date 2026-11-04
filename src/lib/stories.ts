@@ -137,6 +137,8 @@ export interface StoryWire {
   createdAt: Date
   expiresAt: Date
   seen: boolean
+  /** People who have seen it. Sent on the author's own stories only. */
+  seenBy?: number
   /** The shared listing, in the same shape the feed sends. */
   item: V1Item
 }
@@ -174,6 +176,7 @@ export async function listStoryRow(
         select: { ...V1_ITEM_SELECT, user: { select: V1_ITEM_OWNER_SELECT }, ...V1_ITEM_SAFEZONE_SELECT },
       },
       views: { where: { viewerId }, select: { id: true }, take: 1 },
+      _count: { select: { views: true } },
     },
     orderBy: [{ createdAt: "asc" }, { id: "asc" }],
     take: ROW_TAKE,
@@ -198,6 +201,8 @@ export async function listStoryRow(
       createdAt: r.createdAt,
       expiresAt: r.expiresAt,
       seen,
+      // How many people have seen it -- the author's own stories only.
+      ...(isOwn ? { seenBy: r._count.views } : {}),
       item: v1Item(r.item as unknown as V1ItemRow, viewerId),
     })
     group.allSeen = group.allSeen && seen

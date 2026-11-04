@@ -4,6 +4,7 @@ import { resolveSession } from "@/lib/api-auth"
 import prisma from "@/lib/prisma"
 import { leafBalances } from "@/lib/leaves"
 import { expireStaleOffers } from "@/lib/offers"
+import { loadTrustTiers } from "@/lib/trust-tiers"
 import { ok, unauthenticated, invalid, fail } from "@/lib/v1/envelope"
 import { resolveTradeViewer } from "@/lib/trade-participant"
 import { parseQuery, paginationShape, MAX_LIMIT } from "@/lib/v1/query"
@@ -49,6 +50,13 @@ const HISTORY_STATES = ["COMPLETED", "REJECTED", "CANCELLED"] as const
 const querySchema = z.strictObject({
   ...paginationShape,
   tab: z.enum(["active", "history"]).optional().default("active"),
+  /**
+   * One listing's incoming offers, for its offer inbox. Narrows the `offers`
+   * block to PENDING offers this viewer RECEIVED on that item, so a busy
+   * listing is not squeezed out by the 50-row cap shared with every other
+   * listing and every sent offer. Everything else in the response is unchanged.
+   */
+  offersFor: z.string().trim().min(1).max(64).optional(),
 })
 
 /** First image of an item, or null. Stored as a JSON string. */
@@ -96,7 +104,7 @@ export async function GET(req: NextRequest) {
 
   const parsed = parseQuery(req, querySchema)
   if (!parsed.ok) return parsed.response
-  const { limit, tab } = parsed.data
+  const { limit, tab, offersFor } = parsed.data
   const cursor = decodeCursor(parsed.data.cursor)
   if (parsed.data.cursor && !cursor) return invalid("Malformed cursor")
 
@@ -192,15 +200,18 @@ export async function GET(req: NextRequest) {
   // cursor on `trades`, and a screen showing more than 50 live offers has a
   // different problem than pagination.
   const offerRows = await prisma.trade.findMany({
-    where: { OR: [{ senderId: viewerId }, { receiverId: viewerId }], offerStatus: "PENDING" },
+    where: offersFor
+      ? { receiverId: viewerId, requestedItemId: offersFor, offerStatus: "PENDING" }
+      : { OR: [{ senderId: viewerId }, { receiverId: viewerId }], offerStatus: "PENDING" },
     select: {
       id: true, offerStatus: true, offeredLeaves: true,
       bridgeFeeLeaves: true, offeredBracket: true, targetBracket: true,
       message: true, createdAt: true, senderId: true, receiverId: true,
       offeredItem: { select: { id: true, title: true, valueLeaves: true, images: ITEM_IMAGES } },
       requestedItem: { select: ITEM_BRIEF },
-      sender: { select: USER_BRIEF },
-      receiver: { select: USER_BRIEF },
+      // `rating` rides along for the trust tier; see `offerTiers` below.
+      sender: { select: { ...USER_BRIEF, rating: true } },
+      receiver: { select: { ...USER_BRIEF, rating: true } },
     },
     orderBy: [{ createdAt: "desc" }, { id: "desc" }],
     take: MAX_LIMIT,
@@ -328,8 +339,14 @@ export async function GET(req: NextRequest) {
     }
   })
 
+  // The other person's standing, so an offer inbox can rank and badge traders.
+  // One batched lookup for every counterparty on the page.
+  const offerCounterparties = offerRows.map((o) => (o.senderId === viewerId ? o.receiver : o.sender))
+  const offerTiers = await loadTrustTiers(prisma, offerCounterparties)
+
   const offers = offerRows.map((o) => {
     const isSender = o.senderId === viewerId
+    const other = isSender ? o.receiver : o.sender
     /*
      * `offeredItems` keeps its list shape on the wire, built from the real
      * relation (schema v2) where it used to be parsed out of a client-written
@@ -355,7 +372,13 @@ export async function GET(req: NextRequest) {
       offeredItems,
       offeredLeaves: o.offeredLeaves,
       message: o.message,
-      counterparty: isSender ? o.receiver : o.sender,
+      counterparty: {
+        id: other.id,
+        name: other.name,
+        avatar: other.avatar,
+        rating: other.rating,
+        trustTier: offerTiers.get(other.id) ?? null,
+      },
       /**
        * THE BRIDGE, as the trades screen needs it.
        *

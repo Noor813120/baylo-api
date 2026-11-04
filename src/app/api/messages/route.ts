@@ -5,6 +5,7 @@ import { notifyUser } from "@/lib/realtime"
 import { createMessageSchema, parseBody } from "@/lib/validation"
 import { blockDirection, enforceNotBlocked } from "@/lib/blocking"
 import { legacyOrgRefusal, resolveInbox } from "@/lib/inbox"
+import { clearedAt } from "@/lib/chat-prefs"
 
 // Every handler here reads and writes as `inboxId`: the person, or -- acting
 // as a shop -- the shop's backing row. See @/lib/inbox for why a shop's inbox
@@ -46,14 +47,21 @@ export async function GET(req: NextRequest) {
       )
     }
 
+    // "Delete chat" hides what came before it, for this account only.
+    const me = await prisma.user.findUnique({ where: { id: inboxId }, select: { clearedChats: true } })
+    const cleared = clearedAt(me?.clearedChats, partnerId)
+
     const messages = await prisma.message.findMany({
       where: {
         OR: [
           { senderId: inboxId, receiverId: partnerId },
           { senderId: partnerId, receiverId: inboxId },
         ],
+        ...(cleared ? { createdAt: { gt: cleared } } : {}),
       },
       orderBy: { createdAt: "asc" },
+      // The message a reply answers, enough to quote it and jump to it.
+      include: { replyTo: { select: { id: true, content: true, senderId: true } } },
     })
 
     await prisma.message.updateMany({
@@ -106,7 +114,7 @@ export async function POST(req: NextRequest) {
 
     const parsed = await parseBody(req, createMessageSchema)
     if (!parsed.ok) return parsed.response
-    const { receiverId, content, tradeId } = parsed.data
+    const { receiverId, content, tradeId, replyToId } = parsed.data
 
     // Reachable only as a shop: a staff member acting as the shop and opening
     // the shop's own storefront. A thread with oneself has no other side.
@@ -133,6 +141,15 @@ export async function POST(req: NextRequest) {
       if (trade === 0) return NextResponse.json({ error: "Trade not found" }, { status: 404 })
     }
 
+    // A reply must answer a message in THIS chat, not someone else's.
+    if (replyToId) {
+      const pair = [senderId, receiverId]
+      const original = await prisma.message.count({
+        where: { id: replyToId, senderId: { in: pair }, receiverId: { in: pair } },
+      })
+      if (original === 0) return NextResponse.json({ error: "The message you replied to is gone" }, { status: 404 })
+    }
+
     const message = await prisma.$transaction(async (tx) => {
       return tx.message.create({
         data: {
@@ -140,7 +157,9 @@ export async function POST(req: NextRequest) {
           receiverId,
           content,
           tradeId: tradeId || null,
+          replyToId: replyToId || null,
         },
+        include: { replyTo: { select: { id: true, content: true, senderId: true } } },
       })
     })
 
@@ -168,6 +187,8 @@ export async function POST(req: NextRequest) {
       senderId: message.senderId,
       receiverId: message.receiverId,
       createdAt: message.createdAt.toISOString(),
+      replyToId: message.replyToId,
+      replyTo: message.replyTo,
       senderName: shop ? shop.name ?? inbox.acting.organization?.name ?? "" : session.user.name ?? "",
       senderAvatar: shop ? shop.avatar ?? null : session.user.image ?? null,
     }
