@@ -12,7 +12,7 @@ import {
   decideAiValuation,
   issueTicket,
   parseAiValuationAnswer,
-  verifiedSources,
+  verifiedListings,
   type AiFallbackReason,
 } from "@/lib/ai-valuation"
 import { anthropic, HAIKU_MODEL } from "@/lib/anthropic"
@@ -28,9 +28,11 @@ export const dynamic = "force-dynamic"
 /**
  * POST /api/ai/valuation -- the AI-assisted official Leaves suggestion.
  *
- * Claude searches current online listings for the item and recommends a Leaves
- * value inside the range GET /api/v1/valuation computes for the same category
- * and condition. See @/lib/ai-valuation for what Claude may and may not decide.
+ * Claude finds current online listings for the item and their peso asking
+ * prices. The server keeps the ones the search really returned, takes the
+ * median price, finds its level for the category (@/lib/price-levels), and
+ * gives the level's fixed point in the range GET /api/v1/valuation computes for
+ * the same category and condition. Same price, same Leaves, every time.
  *
  * Input is the title, category and condition only. The photo is NOT sent: the
  * search needs words, and a photo would add cost and a privacy question for no
@@ -38,8 +40,9 @@ export const dynamic = "force-dynamic"
  *
  * ── TWO OUTCOMES, BOTH 200 ──────────────────────────────────────────────────
  *
- *   status "ai"        Claude's number passed every check. Comes with an
- *                      explanation, 2-3 verified source links, and a TICKET the
+ *   status "ai"        At least two verified priced listings. Comes with the
+ *                      price summary, the level and the whole level table, up
+ *                      to 3 source links with their prices, and a TICKET the
  *                      client sends with POST /api/items so the listing is
  *                      created with exactly this number.
  *
@@ -107,16 +110,11 @@ export async function POST(req: NextRequest) {
       messages: [
         {
           role: "user",
-          content: aiValuationUserMessage(
-            {
-              title,
-              category,
-              categoryLabel: categoryLabel(category),
-              condition,
-              conditionLabel: conditionLabel(condition),
-            },
-            baseline,
-          ),
+          content: aiValuationUserMessage({
+            title,
+            categoryLabel: categoryLabel(category),
+            conditionLabel: conditionLabel(condition),
+          }),
         },
       ],
       tools: [
@@ -156,12 +154,9 @@ export async function POST(req: NextRequest) {
   const searchResults = message.content.flatMap((b) =>
     b.type === "web_search_tool_result" && Array.isArray(b.content) ? b.content : [],
   )
-  const citedUrls = textBlocks.flatMap((b) =>
-    (b.citations ?? []).flatMap((c) => (c.type === "web_search_result_location" ? [c.url] : [])),
-  )
-  const sources = verifiedSources([...(answer?.sourceUrls ?? []), ...citedUrls], searchResults)
+  const listings = verifiedListings(answer?.listings ?? [], searchResults)
 
-  const decision = decideAiValuation(answer, sources, { min: baseline.min, max: baseline.max })
+  const decision = decideAiValuation(answer, listings, category, { min: baseline.min, max: baseline.max })
   if (!decision.ok) {
     console.warn(`[ai-valuation] fallback: ${decision.reason} (${category}/${condition})`)
     return fallback(decision.reason, baseline)
@@ -191,9 +186,15 @@ export async function POST(req: NextRequest) {
       max: baseline.max,
       allowed: aiAllowed(decision.suggestedLeaves),
       valuationSource: AI_VALUATION_SOURCE,
-      sampleSize: decision.sources.length,
+      sampleSize: decision.market.listingCount,
     },
-    explanation: decision.explanation,
+    market: decision.market,
+    level: {
+      ...decision.level,
+      categoryLabel: categoryLabel(category),
+      ...decision.table,
+    },
+    note: decision.note,
     sources: decision.sources,
     checkedAt: new Date().toISOString(),
     ticket: ticket.ticket,

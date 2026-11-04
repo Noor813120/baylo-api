@@ -178,27 +178,39 @@ interface Valuation {
  * issued for, so a title edited after the estimate makes it stale, and a stale
  * one is never sent (see titleKey / handlePost).
  */
+/** The online price summary and the Baylo price level it falls in. */
+interface AiPriceLevel {
+  market: { typicalPhp: number; lowPhp: number; highPhp: number; listingCount: number };
+  level: {
+    index: 0 | 1 | 2 | 3;
+    name: string;
+    categoryLabel: string;
+    cutoffsPhp: [number, number, number];
+    levels: { name: string; leaves: number }[];
+  };
+  sources: { title: string; url: string; pricePhp: number }[];
+}
+
 type AiValuation =
-  | {
-      status: "ai";
-      key: string;
-      explanation: string;
-      sources: { title: string; url: string }[];
-      checkedAt: string;
-      ticket: string;
-    }
+  | ({ status: "ai"; key: string; ticket: string } & AiPriceLevel)
   | { status: "fallback"; key: string; message: string };
 
 type AiValuationResponse =
-  | {
+  | ({
       status: "ai";
       valuation: { suggestedLeaves: number; allowed: { min: number; max: number } };
-      explanation: string;
-      sources: { title: string; url: string }[];
-      checkedAt: string;
       ticket: string;
-    }
+    } & AiPriceLevel)
   | { status: "fallback"; message: string };
+
+const php = (n: number) => `₱${n.toLocaleString("en-PH")}`;
+
+/** "₱8,000–₱25,000", "under ₱2,000", "₱25,000 and up" for level i. */
+function levelPesoRange(cutoffs: [number, number, number], i: number): string {
+  if (i === 0) return `under ${php(cutoffs[0])}`;
+  if (i === 3) return `${php(cutoffs[2])} and up`;
+  return `${php(cutoffs[i - 1])}–${php(cutoffs[i])}`;
+}
 
 const aiKey = (title: string, category: string, condition: string) =>
   JSON.stringify([title.trim().replace(/\s+/g, " ").toLowerCase(), category, condition]);
@@ -482,17 +494,23 @@ export default function PostWizard({ onClose, onPosted, initialItem, me }: Props
             ai = {
               status: "ai",
               key,
-              explanation: aiBody.explanation,
-              sources: aiBody.sources,
-              checkedAt: aiBody.checkedAt,
               ticket: aiBody.ticket,
+              market: aiBody.market,
+              level: aiBody.level,
+              sources: aiBody.sources,
             };
+            const { market, level } = aiBody;
             shown = {
               ...standard,
               suggestedLeaves: aiBody.valuation.suggestedLeaves,
               allowed: aiBody.valuation.allowed,
               valuationSource: "ai_market",
-              basis: aiBody.explanation,
+              basis:
+                `Online asking prices for this item are typically ${php(market.typicalPhp)} ` +
+                `(${market.listingCount} listings). That is ${level.name} for ${level.categoryLabel.toLowerCase()} ` +
+                `(${levelPesoRange(level.cutoffsPhp, level.index)}), and ${level.name} is always ` +
+                `${level.levels[level.index].leaves.toLocaleString("en-US")} Leaves for this condition. ` +
+                `The same price always gives the same value.`,
             };
           } else {
             ai = {
@@ -917,10 +935,10 @@ export default function PostWizard({ onClose, onPosted, initialItem, me }: Props
               ? <>We calculate an estimated value in Pasa Leaves from your item&rsquo;s
                 category, its condition, and comparable completed trades on Baylo.
                 You can adjust it before you post.</>
-              : <>Claude, Baylo&rsquo;s AI, checks current online listings for your
-                item&rsquo;s name and places it within Baylo&rsquo;s range for its
-                category and condition. Your photo isn&rsquo;t sent. You can adjust
-                the value before you post.</>}
+              : <>Claude, Baylo&rsquo;s AI, finds current online asking prices for your
+                item&rsquo;s name. Baylo then puts that price into a fixed price level for
+                its category, which sets the value. Your photo isn&rsquo;t sent. You can
+                adjust the value before you post.</>}
           </p>
         </div>
       );
@@ -936,7 +954,7 @@ export default function PostWizard({ onClose, onPosted, initialItem, me }: Props
           <p>
             {isEdit
               ? <>Checking completed {catLabel.toLowerCase()} swaps and the category band for {condLabel.toLowerCase()} condition.</>
-              : <>Searching online listings and checking Baylo&rsquo;s {catLabel.toLowerCase()} range for {condLabel.toLowerCase()} condition. This can take up to 20 seconds.</>}
+              : <>Searching online asking prices for this item. This can take up to 20 seconds.</>}
           </p>
         </div>
       );
@@ -959,7 +977,7 @@ export default function PostWizard({ onClose, onPosted, initialItem, me }: Props
     // under a heading that credited both to an AI.
     const isAi = valuation?.valuationSource === "ai_market";
     const sourceNote = isAi
-      ? "AI estimate from online listings"
+      ? `${aiValuation?.status === "ai" ? aiValuation.level.name : ""} for ${catLabel.toLowerCase()} · from online prices`
       : valuation?.valuationSource === "comparables"
       ? `${valuation.sampleSize} comparable completed trade${valuation.sampleSize === 1 ? "" : "s"}`
       : "category & condition band";
@@ -977,7 +995,7 @@ export default function PostWizard({ onClose, onPosted, initialItem, me }: Props
           <div className="pw2-est-panel">
             <div className="pw2-est-header">
               <span>
-                {isAi ? "AI-SUGGESTED VALUE (ESTIMATE)" : aiValuation?.status === "fallback" ? "BAYLO STANDARD ESTIMATE" : "SUGGESTED VALUE"}
+                {isAi ? "SUGGESTED VALUE (ESTIMATE)" : aiValuation?.status === "fallback" ? "BAYLO STANDARD ESTIMATE" : "SUGGESTED VALUE"}
                 {/* The tooltip. Text comes from the server alongside the number
                     so it always describes the calculation that actually ran. */}
                 <button
@@ -1058,24 +1076,57 @@ export default function PostWizard({ onClose, onPosted, initialItem, me }: Props
         </div>
 
         {/* Online sources behind an AI estimate. Shown here only, never stored. */}
-        {isAi && aiSources.length > 0 && (
+        {isAi && aiValuation?.status === "ai" && (
           <div className="pw2-comps">
-            <p className="pw2-comps-label">ONLINE LISTINGS CHECKED</p>
-            {aiSources.map(src => (
-              <div key={src.url} className="pw2-comp-row">
-                <div className="pw2-comp-left">
-                  <p>
-                    <a href={src.url} target="_blank" rel="noopener noreferrer nofollow" style={{ color: "#15803D", textDecoration: "underline" }}>
-                      {src.title}
-                    </a>
-                  </p>
-                  <p>{new URL(src.url).hostname}</p>
-                </div>
+            <p className="pw2-comps-label">ONLINE ASKING PRICE</p>
+            <div className="pw2-comp-row">
+              <div className="pw2-comp-left">
+                <p>{php(aiValuation.market.typicalPhp)} typical</p>
+                <p>
+                  {aiValuation.market.listingCount} listings, {php(aiValuation.market.lowPhp)}–{php(aiValuation.market.highPhp)} · found by AI
+                </p>
               </div>
-            ))}
+            </div>
+
+            <p className="pw2-comps-label" style={{ marginTop: 14 }}>
+              PRICE LEVEL · {aiValuation.level.categoryLabel.toUpperCase()}
+            </p>
+            {aiValuation.level.levels.map((lv, i) => {
+              const here = i === aiValuation.level.index;
+              return (
+                <div key={lv.name} className="pw2-comp-row" aria-current={here ? "true" : undefined}>
+                  <div className="pw2-comp-left">
+                    <p style={here ? { color: "#15803D" } : undefined}>{lv.name}{here ? " ← this item" : ""}</p>
+                    <p>{levelPesoRange(aiValuation.level.cutoffsPhp, i)}</p>
+                  </div>
+                  <span className="pw2-comp-pts" style={here ? { color: "#15803D" } : undefined}>
+                    {fmtLeaves(lv.leaves)}
+                  </span>
+                </div>
+              );
+            })}
+
+            {aiSources.length > 0 && (
+              <>
+                <p className="pw2-comps-label" style={{ marginTop: 14 }}>LISTINGS CHECKED</p>
+                {aiSources.map(src => (
+                  <div key={src.url} className="pw2-comp-row">
+                    <div className="pw2-comp-left">
+                      <p>
+                        <a href={src.url} target="_blank" rel="noopener noreferrer nofollow" style={{ color: "#15803D", textDecoration: "underline" }}>
+                          {src.title}
+                        </a>
+                      </p>
+                      <p>{new URL(src.url).hostname}</p>
+                    </div>
+                    <span className="pw2-comp-pts">{php(src.pricePhp)}</span>
+                  </div>
+                ))}
+              </>
+            )}
             <p style={{ fontSize: 11.5, color: "#9CA3AF", margin: "8px 0 0" }}>
-              Asking prices online, not confirmed sales. Leaves are not pesos: the listings only
-              place your item within Baylo&rsquo;s range.
+              Asking prices found by AI, not confirmed sales. Leaves are not pesos: the price only
+              sets the level.
             </p>
           </div>
         )}

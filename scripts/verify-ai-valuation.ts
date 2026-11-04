@@ -1,5 +1,5 @@
 /**
- * Offline checks for AI-assisted valuation (@/lib/ai-valuation) and the write
+ * Offline checks for AI-assisted valuation (@/lib/ai-valuation, @/lib/price-levels) and the write
  * path's use of it (judgeValue in @/lib/valuation-server).
  *
  * No server, no database query, no Anthropic call. Run with
@@ -12,13 +12,13 @@ import {
   decideAiValuation,
   issueTicket,
   parseAiValuationAnswer,
-  verifiedSources,
+  verifiedListings,
   verifyTicket,
-  type AiSource,
 } from "@/lib/ai-valuation"
+import { PRICE_CUTOFFS_PHP, leavesForLevel, levelOf, medianPhp } from "@/lib/price-levels"
 import { bracketOf } from "@/lib/brackets"
 import { valueCap } from "@/lib/trade-rules"
-import { overrideBounds, valueItem } from "@/lib/valuation"
+import { CATEGORY_BANDS, overrideBounds, valueItem } from "@/lib/valuation"
 import { judgeValue } from "@/lib/valuation-server"
 
 let failures = 0
@@ -32,91 +32,100 @@ function check(name: string, cond: boolean, detail?: unknown) {
 
 const SECRET = "test-secret-not-real"
 const NOW = 1_800_000_000_000
-const range = { min: 100, max: 4000 }
+const range = { min: 120, max: 4800 } // Electronics, Like New
 const results = [
-  { url: "https://shop.example.ph/iphone-13", title: "iPhone 13 128GB - ₱22,000" },
+  { url: "https://shop.example.ph/iphone-13", title: "iPhone 13 128GB" },
   { url: "https://market.example.com/listing/42", title: "Used iPhone 13" },
   { url: "https://third.example.org/p/9", title: "iPhone 13 mini" },
   { url: "https://fourth.example.org/p/1", title: "iPhone 13 Pro" },
   { url: "http://insecure.example.com/x", title: "insecure" },
 ]
-const two: AiSource[] = verifiedSources(
-  ["https://shop.example.ph/iphone-13", "https://market.example.com/listing/42"],
-  results,
-)
+const L = (url: string, pricePhp: number) => ({ url, pricePhp })
+const answer = (listings: { url: string; pricePhp: number }[], note = "Like-new iPhone 13 listings.") => ({ listings, note })
+
+console.log("price levels (the Baylo rule)")
+{
+  let ordered = true
+  for (const [cat, c] of Object.entries(PRICE_CUTOFFS_PHP)) {
+    if (!(c[0] > 0 && c[0] < c[1] && c[1] < c[2])) { ordered = false; console.log("   bad cut-offs:", cat, c) }
+  }
+  check("every category has three increasing cut-offs", ordered)
+  check("all 19 categories have cut-offs", Object.keys(PRICE_CUTOFFS_PHP).length === Object.keys(CATEGORY_BANDS).length)
+  check("₱1,999 is Low for electronics", levelOf("ELECTRONICS", 1999) === 0)
+  check("₱2,000 (on the cut-off) is Typical", levelOf("ELECTRONICS", 2000) === 1)
+  check("₱23,000 is High", levelOf("ELECTRONICS", 23000) === 2)
+  check("₱25,000 is Premium", levelOf("ELECTRONICS", 25000) === 3)
+  check("same ₱23,000 is Premium for books", levelOf("BOOKS", 23000) === 3)
+  check("High in 120-4,800 is 3,396", leavesForLevel(2, range) === 3396, leavesForLevel(2, range))
+  check("levels are 822 / 1,992 / 3,396 / 4,332",
+    [0, 1, 2, 3].map((i) => leavesForLevel(i as 0 | 1 | 2 | 3, range)).join() === "822,1992,3396,4332")
+  check("a one-point range gives that point", leavesForLevel(3, { min: 50, max: 50 }) === 50)
+  check("never below 1", leavesForLevel(0, { min: 1, max: 1 }) === 1)
+  check("median of odd count", medianPhp([25000, 21000, 23000]) === 23000)
+  check("median of even count rounds", medianPhp([100, 201]) === 151)
+  check("median of none is null", medianPhp([]) === null)
+}
 
 console.log("parsing Claude's answer")
 {
   const a = parseAiValuationAnswer(
-    'Here you go:\n{"suggestedLeaves": 2400, "explanation": "Listings ask ₱20-24k.", "sourceUrls": ["https://shop.example.ph/iphone-13"]}',
+    'Here you go:\n{"listings":[{"url":"https://shop.example.ph/iphone-13","pricePhp":21000}],"note":"x"}',
   )
-  check("JSON inside surrounding prose is read", a?.suggestedLeaves === 2400, a)
+  check("JSON inside surrounding prose is read", a?.listings[0]?.pricePhp === 21000, a)
+  check("note is optional", parseAiValuationAnswer('{"listings":[]}')?.note === "")
   check("no JSON -> null", parseAiValuationAnswer("I could not find anything.") === null)
-  check("broken JSON -> null", parseAiValuationAnswer('{"suggestedLeaves": 12,') === null)
-  check(
-    "wrong types -> null",
-    parseAiValuationAnswer('{"suggestedLeaves":"lots","explanation":"x","sourceUrls":[]}') === null,
-  )
-  check(
-    "missing explanation -> null",
-    parseAiValuationAnswer('{"suggestedLeaves":10,"sourceUrls":[]}') === null,
-  )
+  check("broken JSON -> null", parseAiValuationAnswer('{"listings": [') === null)
+  check("wrong types -> null", parseAiValuationAnswer('{"listings":[{"url":1,"pricePhp":"cheap"}]}') === null)
 }
 
-console.log("source links")
+console.log("listings")
 {
-  check("two real search results verify", two.length === 2, two)
-  const invented = verifiedSources(
-    ["https://made-up.example.net/fake", "https://shop.example.ph/iphone-13"],
-    results,
-  )
+  const two = verifiedListings([L(results[0].url, 21000), L(results[1].url, 23000)], results)
+  check("two real search results verify, with titles from the search", two.length === 2 && two[0].title === "iPhone 13 128GB", two)
+  const invented = verifiedListings([L("https://made-up.example.net/fake", 100), L(results[0].url, 21000)], results)
   check("a URL not returned by the search tool is dropped", invented.length === 1 && invented[0].url.includes("shop."), invented)
-  check(
-    "http:// is dropped even if it was a search result",
-    verifiedSources(["http://insecure.example.com/x"], results).length === 0,
-  )
-  check(
-    "javascript: and junk are dropped",
-    verifiedSources(["javascript:alert(1)", "not a url"], results).length === 0,
-  )
-  check(
-    "duplicates collapse",
-    verifiedSources(["https://shop.example.ph/iphone-13", "https://shop.example.ph/iphone-13"], results).length === 1,
-  )
+  check("http:// is dropped even if it was a search result", verifiedListings([L("http://insecure.example.com/x", 5)], results).length === 0)
+  check("javascript: and junk are dropped", verifiedListings([L("javascript:alert(1)", 5), L("not a url", 5)], results).length === 0)
+  check("duplicates collapse (first price kept)",
+    verifiedListings([L(results[0].url, 21000), L(results[0].url, 99000)], results).map((x) => x.pricePhp).join() === "21000")
+  check("zero, negative, NaN and absurd prices are dropped",
+    verifiedListings([L(results[0].url, 0), L(results[1].url, -5), L(results[2].url, NaN), L(results[3].url, 99_000_000)], results).length === 0)
+  check("fractional pesos are rounded", verifiedListings([L(results[0].url, 20999.6)], results)[0]?.pricePhp === 21000)
 }
 
 console.log("deciding on the answer")
 {
-  const ok = decideAiValuation({ suggestedLeaves: 2400, explanation: "x", sourceUrls: [] }, two, range)
-  check("in range with 2 sources -> AI suggestion", ok.ok && ok.suggestedLeaves === 2400, ok)
+  const listings = verifiedListings([L(results[0].url, 21000), L(results[1].url, 23000), L(results[2].url, 24999)], results)
+  const ok = decideAiValuation(answer([]), listings, "ELECTRONICS", range)
+  check("median ₱23,000 -> High -> 3,396 Leaves", ok.ok && ok.market.typicalPhp === 23000 && ok.level.name === "High" && ok.suggestedLeaves === 3396, ok)
+  check("price summary is low/high/count", ok.ok && ok.market.lowPhp === 21000 && ok.market.highPhp === 24999 && ok.market.listingCount === 3)
+  check("level table is returned for the track", ok.ok && ok.table.levels.length === 4 && ok.table.cutoffsPhp.join() === "2000,8000,25000")
 
-  const four = verifiedSources(results.map((r) => r.url), results)
-  const capped = decideAiValuation({ suggestedLeaves: 2400, explanation: "x", sourceUrls: [] }, four, range)
-  check("at most 3 sources are returned", capped.ok && capped.sources.length === 3, capped)
+  const again = decideAiValuation(answer([], "different words"), listings, "ELECTRONICS", range)
+  check("same prices give the same Leaves whatever Claude writes", again.ok && ok.ok && again.suggestedLeaves === ok.suggestedLeaves)
 
-  const edgeLo = decideAiValuation({ suggestedLeaves: 100, explanation: "x", sourceUrls: [] }, two, range)
-  const edgeHi = decideAiValuation({ suggestedLeaves: 4000, explanation: "x", sourceUrls: [] }, two, range)
-  check("range is inclusive at both ends", edgeLo.ok && edgeHi.ok)
+  const four = verifiedListings(results.slice(0, 4).map((r, i) => L(r.url, 20000 + i * 1000)), results)
+  const capped = decideAiValuation(answer([]), four, "ELECTRONICS", range)
+  check("all 4 feed the median, 3 are shown", capped.ok && capped.market.listingCount === 4 && capped.sources.length === 3, capped)
 
-  const above = decideAiValuation({ suggestedLeaves: 4001, explanation: "x", sourceUrls: [] }, two, range)
-  const below = decideAiValuation({ suggestedLeaves: 99, explanation: "x", sourceUrls: [] }, two, range)
-  check("above range -> OUT_OF_RANGE (rejected, not clamped)", !above.ok && above.reason === "OUT_OF_RANGE", above)
-  check("below range -> OUT_OF_RANGE", !below.ok && below.reason === "OUT_OF_RANGE", below)
+  check("1 verified listing -> INSUFFICIENT_SOURCES", (() => { const r = decideAiValuation(answer([]), listings.slice(0, 1), "ELECTRONICS", range); return !r.ok && r.reason === "INSUFFICIENT_SOURCES" })())
+  check("none -> INSUFFICIENT_SOURCES", (() => { const r = decideAiValuation(answer([]), [], "ELECTRONICS", range); return !r.ok && r.reason === "INSUFFICIENT_SOURCES" })())
+  check("unreadable answer -> INVALID_AI_RESPONSE", (() => { const r = decideAiValuation(null, listings, "ELECTRONICS", range); return !r.ok && r.reason === "INVALID_AI_RESPONSE" })())
 
-  const frac = decideAiValuation({ suggestedLeaves: 250.5, explanation: "x", sourceUrls: [] }, two, range)
-  check("non-integer -> INVALID_AI_RESPONSE", !frac.ok && frac.reason === "INVALID_AI_RESPONSE", frac)
-
-  const nul = decideAiValuation({ suggestedLeaves: null, explanation: "x", sourceUrls: [] }, two, range)
-  check("Claude says not enough listings -> INSUFFICIENT_SOURCES", !nul.ok && nul.reason === "INSUFFICIENT_SOURCES", nul)
-
-  const one = decideAiValuation({ suggestedLeaves: 500, explanation: "x", sourceUrls: [] }, two.slice(0, 1), range)
-  check("only 1 verified source -> INSUFFICIENT_SOURCES", !one.ok && one.reason === "INSUFFICIENT_SOURCES", one)
-
-  const bad = decideAiValuation(null, two, range)
-  check("unreadable answer -> INVALID_AI_RESPONSE", !bad.ok && bad.reason === "INVALID_AI_RESPONSE", bad)
-
-  const long = decideAiValuation({ suggestedLeaves: 500, explanation: "y".repeat(600), sourceUrls: [] }, two, range)
-  check("explanation trimmed to 300 chars", long.ok && long.explanation.length === 300)
+  let inRange = true
+  for (const cat of Object.keys(PRICE_CUTOFFS_PHP)) {
+    for (const cond of ["NEW", "LIKE_NEW", "GOOD", "FAIR", "POOR"]) {
+      const v = valueItem({ category: cat, condition: cond, comparables: [] })
+      for (const price of [1, 150, 999, 5000, 50000, 9_000_000]) {
+        const d = decideAiValuation(answer([]), [
+          { url: "https://a.example/1", title: "a", pricePhp: price },
+          { url: "https://b.example/2", title: "b", pricePhp: price },
+        ], cat, { min: v.min, max: v.max })
+        if (!d.ok || d.suggestedLeaves < v.min || d.suggestedLeaves > v.max) { inRange = false; console.log("   out:", cat, cond, price, d) }
+      }
+    }
+  }
+  check("every category x condition x price stays inside Baylo's range", inRange)
 }
 
 console.log("tickets")
