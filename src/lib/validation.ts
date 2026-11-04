@@ -350,6 +350,12 @@ export const createItemSchema = refinePerishable(
     category: categorySchema,
     condition: conditionSchema,
     valueLeaves: leafAmountSchema.nullish(),
+    /**
+     * The signed ticket from POST /api/ai/valuation. Present = the listing is
+     * valued from that AI suggestion; absent = the deterministic one. Opaque
+     * to clients; verified in @/lib/ai-valuation.
+     */
+    valuationTicket: z.string().trim().max(2048).nullish(),
     images: z.array(z.string().trim().max(MAX_URL)).max(10).optional(),
     wantedItems: optionalText(MAX_WANTED),
     imageHash: z.string().trim().max(128).nullish(),
