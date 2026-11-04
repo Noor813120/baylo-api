@@ -1,3 +1,4 @@
+import { escapeLike } from "@/lib/like"
 import { NextRequest } from "next/server"
 import { resolveSession } from "@/lib/api-auth"
 import prisma from "@/lib/prisma"
@@ -167,15 +168,15 @@ export async function GET(req: NextRequest) {
     ...(q
       ? {
           OR: [
-            { title: { contains: q, mode: "insensitive" as const } },
-            { description: { contains: q, mode: "insensitive" as const } },
+            { title: { contains: escapeLike(q), mode: "insensitive" as const } },
+            { description: { contains: escapeLike(q), mode: "insensitive" as const } },
             {
               user: {
                 is: {
                   isOrgAccount: true,
                   organization: {
                     is: {
-                      name: { contains: q, mode: "insensitive" as const },
+                      name: { contains: escapeLike(q), mode: "insensitive" as const },
                       verificationStatus: { not: "REJECTED" as const },
                     },
                   },
@@ -362,7 +363,7 @@ export async function GET(req: NextRequest) {
     return q && !cursor
       ? prisma.organization.findMany({
           where: {
-            name: { contains: q, mode: "insensitive" },
+            name: { contains: escapeLike(q), mode: "insensitive" },
             verificationStatus: { not: "REJECTED" },
             ...(businessCategory ? { businessCategory: { in: businessCategory } } : {}),
             orgUser: { is: { ...userNotBlocked(viewerId), ...notSuspendedWhere() } },

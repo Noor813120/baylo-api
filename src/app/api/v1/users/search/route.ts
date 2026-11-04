@@ -9,6 +9,7 @@ import { loadTrustTiers } from "@/lib/trust-tiers"
 import { decodeCursor, encodeCursor, paginate } from "@/lib/v1/cursor"
 import { invalid, ok, unauthenticated } from "@/lib/v1/envelope"
 import { enforceRateLimit } from "@/lib/rate-limit-config"
+import { escapeLike } from "@/lib/like"
 import { parseQuery } from "@/lib/v1/query"
 
 export const dynamic = "force-dynamic"
@@ -40,7 +41,8 @@ export async function GET(req: NextRequest) {
     where: {
       id: { not: viewerId },
       deletedAt: null,
-      name: { contains: q, mode: "insensitive" },
+      // Escaped: `%` and `_` in a search are characters, not wildcards.
+      name: { contains: escapeLike(q), mode: "insensitive" },
       ...userNotBlocked(viewerId),
       ...notSuspendedWhere(),
       ...(cursor && typeof cursor.k === "string"
