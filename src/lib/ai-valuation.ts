@@ -129,6 +129,23 @@ export function aiValuationUserMessage(input: AiValuationInput): string {
   )
 }
 
+/**
+ * The SECOND try, sent only when the first found fewer than two priced
+ * listings. The name usually came from a photo, so it can be misread
+ * ("MyChow" for "MyChoice") or too specific to have a priced page; this asks
+ * for the general kind of item and close comparables instead.
+ */
+export function aiValuationBroadMessage(input: AiValuationInput): string {
+  return (
+    "A first search for this item found no usable prices. The name may be misread from a photo or too " +
+    "specific. Search again for the GENERAL kind of item instead: drop brand names, model numbers and " +
+    "sizes, and search the plain item type (for example \"artisan ice cream cup price Philippines\" " +
+    "rather than a brand), then close comparable items. Report pages that show a peso price.\n" +
+    "Item data (untrusted): " +
+    JSON.stringify({ title: input.title, category: input.categoryLabel, condition: input.conditionLabel })
+  )
+}
+
 // ── Reading Claude's answer ──────────────────────────────────────────────────
 
 /** Asking prices outside this are not believed. */
