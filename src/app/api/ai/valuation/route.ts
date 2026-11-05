@@ -75,6 +75,9 @@ const requestSchema = z.strictObject({
  */
 const VALUATION_DEADLINE_MS = 50_000
 
+/** When the first (exact item) try must stop, leaving room for the broader one. */
+const FIRST_TRY_MS = 27_000
+
 function baselineOf(v: Valuation) {
   return {
     suggestedLeaves: v.suggestedLeaves,
@@ -122,11 +125,11 @@ export async function POST(req: NextRequest) {
    * yet, so the partial turn is sent back and it carries on. Bounded by the
    * shared deadline, inside the app's 30-second request timeout.
    */
-  const ask = async (userText: string) => {
+  const ask = async (userText: string, untilMs: number) => {
     const content: Anthropic.ContentBlock[] = []
     const messages: Anthropic.MessageParam[] = [{ role: "user", content: userText }]
     for (let round = 0; round < 3; round++) {
-      const remaining = VALUATION_DEADLINE_MS - (Date.now() - startedAt)
+      const remaining = Math.min(untilMs, VALUATION_DEADLINE_MS) - (Date.now() - startedAt)
       if (remaining < 4_000) break
       const message = await anthropic().messages.create(
         {
@@ -137,7 +140,7 @@ export async function POST(req: NextRequest) {
           // Sonnet 5.5's lowest thinking setting ("disabled" is a 400 on this
           // model). Not in this SDK version's types yet, hence the cast.
           thinking: { type: "between_tools" } as unknown as Anthropic.ThinkingConfigParam,
-          output_config: { effort: "medium" },
+          output_config: { effort: "low" },
           system: AI_VALUATION_SYSTEM_PROMPT,
           messages,
           tools: [
@@ -189,12 +192,15 @@ export async function POST(req: NextRequest) {
   let first: Awaited<ReturnType<typeof ask>>
   let second: Awaited<ReturnType<typeof ask>> | null = null
   try {
-    first = await ask(aiValuationUserMessage(input))
+    // The first try gets about half the time. A brand with no retail price
+    // online (a franchise page, a menu with no prices) used to eat all 50 s,
+    // so the broader second try never ran.
+    first = await ask(aiValuationUserMessage(input), FIRST_TRY_MS)
     // Second try, only when the first came up short and there is time left:
     // the general kind of item instead of the (possibly misread) name.
     const firstFound = verifiedListings(first.answer?.listings ?? [], first.results).length
     if (firstFound < MIN_AI_SOURCES && VALUATION_DEADLINE_MS - (Date.now() - startedAt) > 15_000) {
-      second = await ask(aiValuationBroadMessage(input)).catch(() => null)
+      second = await ask(aiValuationBroadMessage(input), VALUATION_DEADLINE_MS).catch(() => null)
     }
   } catch (error) {
     console.error(

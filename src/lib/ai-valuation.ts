@@ -114,7 +114,10 @@ export const AI_VALUATION_SYSTEM_PROMPT =
   "- Search the item name with words like \"price Philippines\" or \"price list\" (for food, \"menu price\").\n" +
   "- If that finds no prices, search a shorter or more general name (brand and model, or the dish and " +
   "restaurant), then a close comparable item (same brand and type, a near model or size).\n" +
-  "- Most items have prices somewhere. Do not stop at the first search if it found none.\n\n" +
+  "- Most items have prices somewhere. Do not stop at the first search if it found none.\n" +
+  "- Spend at most two searches on the exact brand or model. If its own pages show no retail price (only " +
+  "franchise, wholesale or contact-us pages), move on to comparable items of the same type and size; a " +
+  "comparable price is far better than none.\n\n" +
   "Rules:\n" +
   "- Report whole Philippine pesos.\n" +
   "- Each url must be copied exactly, character for character, from a search result or a page you opened " +
