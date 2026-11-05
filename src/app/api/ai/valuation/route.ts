@@ -31,10 +31,9 @@ export const maxDuration = 30
  * POST /api/ai/valuation -- the AI-assisted official Leaves suggestion.
  *
  * Claude finds current online listings for the item and their peso asking
- * prices. The server keeps the ones the search really returned, takes the
- * median price, finds its level for the category (@/lib/price-levels), and
- * gives the level's fixed point in the range GET /api/v1/valuation computes for
- * the same category and condition. Same price, same Leaves, every time.
+ * prices. The server keeps the ones the search really returned and takes the
+ * median price; at 1 Leaf = ₱1 that median is the suggested value. Same
+ * price, same Leaves, every time.
  *
  * Input is the title, category and condition only. The photo is NOT sent: the
  * search needs words, and a photo would add cost and a privacy question for no
@@ -210,14 +209,17 @@ export async function POST(req: NextRequest) {
     return fallback(decision.reason, baseline)
   }
 
+  // The range is drawn around the AI suggestion now that it is the price
+  // itself (1 Leaf = ₱1), not a point inside the category's standard range.
+  const band = aiAllowed(decision.suggestedLeaves)
   const ticket = issueTicket({
     userId,
     title,
     category,
     condition,
     suggestedLeaves: decision.suggestedLeaves,
-    min: baseline.min,
-    max: baseline.max,
+    min: band.min,
+    max: band.max,
   })
   if (!ticket) {
     // No AUTH_SECRET means no verifiable ticket, and an AI number the create
@@ -230,9 +232,9 @@ export async function POST(req: NextRequest) {
     status: "ai" as const,
     valuation: {
       suggestedLeaves: decision.suggestedLeaves,
-      min: baseline.min,
-      max: baseline.max,
-      allowed: aiAllowed(decision.suggestedLeaves),
+      min: band.min,
+      max: band.max,
+      allowed: band,
       valuationSource: AI_VALUATION_SOURCE,
       sampleSize: decision.market.listingCount,
     },
