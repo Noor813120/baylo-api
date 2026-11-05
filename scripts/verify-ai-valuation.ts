@@ -90,6 +90,12 @@ console.log("listings")
     verifiedListings([L(results[0].url, 21000), L(results[0].url, 99000)], results).map((x) => x.pricePhp).join() === "21000")
   check("zero, negative, NaN and absurd prices are dropped",
     verifiedListings([L(results[0].url, 0), L(results[1].url, -5), L(results[2].url, NaN), L(results[3].url, 99_000_000)], results).length === 0)
+  check("same page with tracking query / trailing slash / www. still verifies",
+    verifiedListings([L("https://www.shop.example.ph/iphone-13/?sp_atk=abc#top", 21000)], results)[0]?.url === results[0].url)
+  check("the search tool's URL is kept, not Claude's spelling",
+    verifiedListings([L("https://m.market.example.com/listing/42?ref=x", 23000)], results)[0]?.url === results[1].url)
+  check("a different path on the same host is still dropped",
+    verifiedListings([L("https://shop.example.ph/iphone-14", 21000)], results).length === 0)
   check("fractional pesos are rounded", verifiedListings([L(results[0].url, 20999.6)], results)[0]?.pricePhp === 21000)
 }
 

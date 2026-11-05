@@ -24,6 +24,8 @@ import { valuate } from "@/lib/valuation-server"
 import type { Valuation } from "@/lib/valuation"
 
 export const dynamic = "force-dynamic"
+// Searches plus the answer can take most of the app's 30-second wait.
+export const maxDuration = 30
 
 /**
  * POST /api/ai/valuation -- the AI-assisted official Leaves suggestion.
@@ -64,6 +66,9 @@ const requestSchema = z.strictObject({
   condition: conditionSchema,
 })
 
+/** All of Claude's time for one valuation. The app gives up at 30 seconds. */
+const VALUATION_DEADLINE_MS = 26_000
+
 function baselineOf(v: Valuation) {
   return {
     suggestedLeaves: v.suggestedLeaves,
@@ -101,37 +106,56 @@ export async function POST(req: NextRequest) {
   // The guardrail. Same function, same range the create handler falls back to.
   const baseline = await valuate(category, condition)
 
-  let message: Anthropic.Message
+  // Every block of the turn, across pause_turn continuations.
+  const content: Anthropic.ContentBlock[] = []
+  let stopReason: string | null = null
+  const startedAt = Date.now()
   try {
-    message = await anthropic().messages.create({
-      model: HAIKU_MODEL,
-      max_tokens: 700,
-      system: AI_VALUATION_SYSTEM_PROMPT,
-      messages: [
+    const messages: Anthropic.MessageParam[] = [
+      {
+        role: "user",
+        content: aiValuationUserMessage({
+          title,
+          categoryLabel: categoryLabel(category),
+          conditionLabel: conditionLabel(condition),
+        }),
+      },
+    ]
+    // A turn with several searches can come back as pause_turn: the server
+    // stopped mid-turn and the answer is not written yet. Send the partial
+    // turn back and it carries on. Bounded, and inside the app's 30-second
+    // request timeout.
+    for (let round = 0; round < 3; round++) {
+      const remaining = VALUATION_DEADLINE_MS - (Date.now() - startedAt)
+      if (remaining < 4_000) break
+      const message = await anthropic().messages.create(
         {
-          role: "user",
-          content: aiValuationUserMessage({
-            title,
-            categoryLabel: categoryLabel(category),
-            conditionLabel: conditionLabel(condition),
-          }),
+          model: HAIKU_MODEL,
+          max_tokens: 2048,
+          system: AI_VALUATION_SYSTEM_PROMPT,
+          messages,
+          tools: [
+            {
+              type: "web_search_20250305",
+              name: "web_search",
+              max_uses: AI_VALUATION_MAX_SEARCHES,
+              user_location: {
+                type: "approximate",
+                city: "Lapu-Lapu City",
+                region: "Central Visayas",
+                country: "PH",
+                timezone: "Asia/Manila",
+              },
+            },
+          ],
         },
-      ],
-      tools: [
-        {
-          type: "web_search_20250305",
-          name: "web_search",
-          max_uses: AI_VALUATION_MAX_SEARCHES,
-          user_location: {
-            type: "approximate",
-            city: "Lapu-Lapu City",
-            region: "Central Visayas",
-            country: "PH",
-            timezone: "Asia/Manila",
-          },
-        },
-      ],
-    })
+        { timeout: remaining, maxRetries: 0 },
+      )
+      content.push(...message.content)
+      stopReason = message.stop_reason
+      if (message.stop_reason !== "pause_turn") break
+      messages.push({ role: "assistant", content: message.content })
+    }
   } catch (error) {
     console.error(
       "[ai-valuation] Claude call failed:",
@@ -148,17 +172,41 @@ export async function POST(req: NextRequest) {
     )
   }
 
-  const textBlocks = message.content.filter((b): b is Anthropic.TextBlock => b.type === "text")
-  const answer = parseAiValuationAnswer(textBlocks.map((b) => b.text).join("\n"))
+  // Joined with nothing: a cited answer arrives as several text blocks, and a
+  // block boundary can fall inside the JSON.
+  const textBlocks = content.filter((b): b is Anthropic.TextBlock => b.type === "text")
+  const answer = parseAiValuationAnswer(textBlocks.map((b) => b.text).join(""))
 
-  const searchResults = message.content.flatMap((b) =>
-    b.type === "web_search_tool_result" && Array.isArray(b.content) ? b.content : [],
+  const resultBlocks = content.filter(
+    (b): b is Anthropic.WebSearchToolResultBlock => b.type === "web_search_tool_result",
+  )
+  const searchResults = resultBlocks.flatMap((b) => (Array.isArray(b.content) ? b.content : []))
+  // A failed search comes back as an error object in place of the results
+  // list (max_uses_exceeded, too_many_requests, unavailable...). Before this
+  // it read as "no results" with nothing in the logs.
+  const searchErrors = resultBlocks.flatMap((b) =>
+    Array.isArray(b.content) ? [] : [(b.content as { error_code?: string }).error_code ?? "unknown"],
   )
   const listings = verifiedListings(answer?.listings ?? [], searchResults)
 
   const decision = decideAiValuation(answer, listings, category, { min: baseline.min, max: baseline.max })
   if (!decision.ok) {
-    console.warn(`[ai-valuation] fallback: ${decision.reason} (${category}/${condition})`)
+    // What a fallback actually was, so "no prices found" can be told apart
+    // from "prices found but their URLs did not match" and from a search
+    // error. No title (user text) and no URLs, only counts.
+    console.warn(
+      `[ai-valuation] fallback: ${decision.reason} (${category}/${condition})`,
+      JSON.stringify({
+        stop: stopReason,
+        ms: Date.now() - startedAt,
+        searches: resultBlocks.length,
+        results: searchResults.length,
+        searchErrors,
+        claimed: answer?.listings.length ?? null,
+        verified: listings.length,
+        note: answer?.note.slice(0, 200) ?? null,
+      }),
+    )
     return fallback(decision.reason, baseline)
   }
 
