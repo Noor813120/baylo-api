@@ -36,6 +36,15 @@ import Anthropic from "@anthropic-ai/sdk"
  */
 export const HAIKU_MODEL = "claude-haiku-5-5"
 
+/**
+ * Claude Sonnet 5.5, for the online price check ONLY (5 Nov 2026). It gets
+ * the newer web search (filters results) and web fetch (opens the shop page
+ * to read the price), which Haiku does not, and finding a real price is the
+ * whole job of that call. About 20x Haiku 5.5's per-token price, so it is
+ * not used anywhere else.
+ */
+export const SONNET_MODEL = "claude-sonnet-5-5"
+
 /** Thinking off, for Baylo's short structured calls. See HAIKU_MODEL. */
 export const NO_THINKING = { type: "disabled" } as const
 

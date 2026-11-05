@@ -62,6 +62,9 @@ export const MAX_AI_SOURCES = 3
 /** Web searches Claude may run per valuation. Each one is billed. */
 export const AI_VALUATION_MAX_SEARCHES = 5
 
+/** Pages Claude may open per valuation to read a price off the page. */
+export const AI_VALUATION_MAX_FETCHES = 4
+
 /**
  * How long a ticket stays usable. Long enough for someone to finish the
  * wizard (hubs, photos, review); short enough that a ticket is not a value
@@ -105,7 +108,8 @@ export const AI_VALUATION_SYSTEM_PROMPT =
   "price comparison sites, and articles or blog posts that state the price.\n" +
   "- New and secondhand prices both count. Prefer the Philippines; use another country only if nothing " +
   "local has a price, converted to pesos.\n" +
-  "- A price written in a search result's own text counts.\n\n" +
+  "- A price written in a search result's own text counts. If a result looks like the right item but its " +
+  "snippet shows no price, open the page with web_fetch to read the price.\n\n" +
   "How to search:\n" +
   "- Search the item name with words like \"price Philippines\" or \"price list\" (for food, \"menu price\").\n" +
   "- If that finds no prices, search a shorter or more general name (brand and model, or the dish and " +
@@ -113,7 +117,8 @@ export const AI_VALUATION_SYSTEM_PROMPT =
   "- Most items have prices somewhere. Do not stop at the first search if it found none.\n\n" +
   "Rules:\n" +
   "- Report whole Philippine pesos.\n" +
-  "- Each url must be copied exactly, character for character, from a search result that shows that price. " +
+  "- Each url must be copied exactly, character for character, from a search result or a page you opened " +
+  "that shows that price. " +
   "Never invent a URL or a price.\n" +
   "- Report at most five pages, one price each. If you truly found none, return an empty list.\n" +
   "- note: one short plain sentence on what you found (which item, model or size the prices were for).\n" +

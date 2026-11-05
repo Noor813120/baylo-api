@@ -4,6 +4,7 @@ import { z } from "zod"
 
 import {
   AI_FALLBACK_MESSAGES,
+  AI_VALUATION_MAX_FETCHES,
   AI_VALUATION_MAX_SEARCHES,
   AI_VALUATION_SOURCE,
   AI_VALUATION_SYSTEM_PROMPT,
@@ -17,7 +18,7 @@ import {
   verifiedListings,
   type AiFallbackReason,
 } from "@/lib/ai-valuation"
-import { anthropic, HAIKU_MODEL, NO_THINKING } from "@/lib/anthropic"
+import { anthropic, SONNET_MODEL } from "@/lib/anthropic"
 import { resolveSession } from "@/lib/api-auth"
 import { enforceRateLimit } from "@/lib/rate-limit-config"
 import { categoryLabel, conditionLabel } from "@/lib/v1/taxonomy"
@@ -27,7 +28,7 @@ import type { Valuation } from "@/lib/valuation"
 
 export const dynamic = "force-dynamic"
 // Searches plus the answer can take most of the app's 30-second wait.
-export const maxDuration = 30
+export const maxDuration = 60
 
 /**
  * POST /api/ai/valuation -- the AI-assisted official Leaves suggestion.
@@ -67,8 +68,12 @@ const requestSchema = z.strictObject({
   condition: conditionSchema,
 })
 
-/** All of Claude's time for one valuation. The app gives up at 30 seconds. */
-const VALUATION_DEADLINE_MS = 26_000
+/**
+ * All of Claude's time for one valuation. Opening shop pages is slower than
+ * reading snippets, so the app waits up to 60 seconds for this endpoint
+ * (builds before 5 Nov 2026 wait 30 and show the standard estimate).
+ */
+const VALUATION_DEADLINE_MS = 50_000
 
 function baselineOf(v: Valuation) {
   return {
@@ -125,16 +130,19 @@ export async function POST(req: NextRequest) {
       if (remaining < 4_000) break
       const message = await anthropic().messages.create(
         {
-          model: HAIKU_MODEL,
-          max_tokens: 2048,
-          // Haiku 5.5 thinks by default; this is a search-and-report task on
-          // a fixed budget, so thinking stays off.
-          thinking: NO_THINKING,
+          model: SONNET_MODEL,
+          // Thinking counts toward max_tokens on Sonnet 5.5; room for the
+          // short notes between searches as well as the JSON answer.
+          max_tokens: 8000,
+          // Sonnet 5.5's lowest thinking setting ("disabled" is a 400 on this
+          // model). Not in this SDK version's types yet, hence the cast.
+          thinking: { type: "between_tools" } as unknown as Anthropic.ThinkingConfigParam,
+          output_config: { effort: "medium" },
           system: AI_VALUATION_SYSTEM_PROMPT,
           messages,
           tools: [
             {
-              type: "web_search_20250305",
+              type: "web_search_20260209",
               name: "web_search",
               max_uses: AI_VALUATION_MAX_SEARCHES,
               user_location: {
@@ -145,6 +153,9 @@ export async function POST(req: NextRequest) {
                 timezone: "Asia/Manila",
               },
             },
+            // Opens a shop page to read its price: most PH shop and menu
+            // pages show the price only on the page, not in the snippet.
+            { type: "web_fetch_20260209", name: "web_fetch", max_uses: AI_VALUATION_MAX_FETCHES, max_content_tokens: 6000 },
           ],
         },
         { timeout: remaining, maxRetries: 0 },
@@ -160,10 +171,18 @@ export async function POST(req: NextRequest) {
     const resultBlocks = content.filter(
       (b): b is Anthropic.WebSearchToolResultBlock => b.type === "web_search_tool_result",
     )
+    // A page Claude opened with web fetch is as real a source as a search
+    // result: the tool fetched it. Its URL counts for verification too.
+    const fetched = content
+      .filter((b): b is Anthropic.WebFetchToolResultBlock => b.type === "web_fetch_tool_result")
+      .flatMap((b) => {
+        const c = b.content as { type?: string; url?: string; content?: { title?: string | null } }
+        return c.type === "web_fetch_result" && typeof c.url === "string" ? [{ url: c.url, title: c.content?.title ?? null }] : []
+      })
     return {
       answer: parseAiValuationAnswer(text),
       resultBlocks,
-      results: resultBlocks.flatMap((b) => (Array.isArray(b.content) ? b.content : [])),
+      results: [...resultBlocks.flatMap((b) => (Array.isArray(b.content) ? b.content : [])), ...fetched],
     }
   }
 
@@ -174,7 +193,7 @@ export async function POST(req: NextRequest) {
     // Second try, only when the first came up short and there is time left:
     // the general kind of item instead of the (possibly misread) name.
     const firstFound = verifiedListings(first.answer?.listings ?? [], first.results).length
-    if (firstFound < MIN_AI_SOURCES && VALUATION_DEADLINE_MS - (Date.now() - startedAt) > 9_000) {
+    if (firstFound < MIN_AI_SOURCES && VALUATION_DEADLINE_MS - (Date.now() - startedAt) > 15_000) {
       second = await ask(aiValuationBroadMessage(input)).catch(() => null)
     }
   } catch (error) {
