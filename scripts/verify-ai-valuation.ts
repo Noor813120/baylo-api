@@ -103,7 +103,8 @@ console.log("deciding on the answer")
 {
   const listings = verifiedListings([L(results[0].url, 21000), L(results[1].url, 23000), L(results[2].url, 24999)], results)
   const ok = decideAiValuation(answer([]), listings, "ELECTRONICS", range)
-  check("median ₱23,000 -> High -> 3,396 Leaves", ok.ok && ok.market.typicalPhp === 23000 && ok.level.name === "High" && ok.suggestedLeaves === 3396, ok)
+  check("median ₱23,000 -> 23,000 Leaves (1 Leaf = ₱1)", ok.ok && ok.market.typicalPhp === 23000 && ok.suggestedLeaves === 23000, ok)
+  check("the level is still reported for older clients", ok.ok && ok.level.name === "High")
   check("price summary is low/high/count", ok.ok && ok.market.lowPhp === 21000 && ok.market.highPhp === 24999 && ok.market.listingCount === 3)
   check("level table is returned for the track", ok.ok && ok.table.levels.length === 4 && ok.table.cutoffsPhp.join() === "2000,8000,25000")
 
@@ -118,7 +119,9 @@ console.log("deciding on the answer")
   check("none -> INSUFFICIENT_SOURCES", (() => { const r = decideAiValuation(answer([]), [], "ELECTRONICS", range); return !r.ok && r.reason === "INSUFFICIENT_SOURCES" })())
   check("unreadable answer -> INVALID_AI_RESPONSE", (() => { const r = decideAiValuation(null, listings, "ELECTRONICS", range); return !r.ok && r.reason === "INVALID_AI_RESPONSE" })())
 
-  let inRange = true
+  // 1 Leaf = ₱1: the suggestion is the median price, whatever the category or
+  // condition, and the slider band drawn around it always contains it.
+  let onePeso = true
   for (const cat of Object.keys(PRICE_CUTOFFS_PHP)) {
     for (const cond of ["NEW", "LIKE_NEW", "GOOD", "FAIR", "POOR"]) {
       const v = valueItem({ category: cat, condition: cond, comparables: [] })
@@ -127,11 +130,12 @@ console.log("deciding on the answer")
           { url: "https://a.example/1", title: "a", pricePhp: price },
           { url: "https://b.example/2", title: "b", pricePhp: price },
         ], cat, { min: v.min, max: v.max })
-        if (!d.ok || d.suggestedLeaves < v.min || d.suggestedLeaves > v.max) { inRange = false; console.log("   out:", cat, cond, price, d) }
+        const band = d.ok ? overrideBounds(d.suggestedLeaves) : null
+        if (!d.ok || d.suggestedLeaves !== price || !band || d.suggestedLeaves < band.min || d.suggestedLeaves > band.max) { onePeso = false; console.log("   off:", cat, cond, price, d) }
       }
     }
   }
-  check("every category x condition x price stays inside Baylo's range", inRange)
+  check("every category x condition x price: Leaves = pesos, inside its own band", onePeso)
 }
 
 console.log("tickets")

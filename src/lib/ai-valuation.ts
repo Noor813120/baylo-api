@@ -3,7 +3,6 @@ import { z } from "zod"
 
 import {
   PRICE_LEVEL_NAMES,
-  leavesForLevel,
   levelOf,
   levelTable,
   medianPhp,
@@ -13,18 +12,21 @@ import { overrideBounds } from "@/lib/valuation"
 
 /**
  * AI-assisted official valuation: Claude finds current online listings and
- * their peso asking prices; Baylo's fixed price levels turn that into Leaves.
+ * their peso asking prices, and the median price IS the suggested value.
  *
- * ── WHAT CLAUDE DECIDES, AND WHAT IT DOES NOT ───────────────────────────────
+ * ── 1 LEAF = ₱1 ─────────────────────────────────────────────────────────────
  *
- * Claude reports listings and their prices. That is all. It never sees Leaves
- * or the range. The server keeps only listings the search tool really
- * returned, takes their median price, and @/lib/price-levels turns that into a
- * level (Low / Typical / High / Premium for the category) and the level into a
- * fixed point inside Baylo's existing range for the category and condition
- * (@/lib/valuation, unchanged). No peso-to-Leaves rate exists anywhere: pesos
- * only ever pick the level. The bracket, review routing and override rules in
- * @/lib/trade-rules still run server-side on the resulting number.
+ * Leaves are counted on the peso scale. It is not an exchange rate (Leaves are
+ * never bought or cashed out); it is the unit the brackets are drawn in, so a
+ * ₱23,000 laptop is 23,000 Leaves and lands in the bracket that number falls
+ * in. Claude reports listings and prices, never Leaves; the server keeps only
+ * listings the search tool really returned, takes the median, and that is the
+ * suggestion. The bracket, review routing and override rules in
+ * @/lib/trade-rules still run server-side on it.
+ *
+ * The price levels (@/lib/price-levels) are still computed and returned for
+ * clients built before this change, which draw them; they no longer set the
+ * value.
  *
  * ── WHY A SIGNED TICKET ─────────────────────────────────────────────────────
  *
@@ -265,7 +267,8 @@ export function decideAiValuation(
   const index = levelOf(category, typicalPhp)
   return {
     ok: true,
-    suggestedLeaves: leavesForLevel(index, range),
+    // 1 Leaf = ₱1: the median asking price is the suggestion.
+    suggestedLeaves: Math.max(1, Math.round(typicalPhp)),
     market: {
       typicalPhp,
       lowPhp: Math.min(...prices),
