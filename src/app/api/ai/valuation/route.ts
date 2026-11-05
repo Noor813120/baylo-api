@@ -75,8 +75,6 @@ const requestSchema = z.strictObject({
  */
 const VALUATION_DEADLINE_MS = 50_000
 
-/** When the first (exact item) try must stop, leaving room for the broader one. */
-const FIRST_TRY_MS = 27_000
 
 function baselineOf(v: Valuation) {
   return {
@@ -123,7 +121,7 @@ export async function POST(req: NextRequest) {
    * One search-and-answer turn. A turn with several searches can come back
    * as pause_turn: the server stopped mid-turn and the answer is not written
    * yet, so the partial turn is sent back and it carries on. Bounded by the
-   * shared deadline, inside the app's 30-second request timeout.
+   * shared deadline, inside the app's 60-second request timeout.
    */
   const ask = async (userText: string, untilMs: number) => {
     const content: Anthropic.ContentBlock[] = []
@@ -189,38 +187,37 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  let first: Awaited<ReturnType<typeof ask>>
-  let second: Awaited<ReturnType<typeof ask>> | null = null
-  try {
-    // The first try gets about half the time. A brand with no retail price
-    // online (a franchise page, a menu with no prices) used to eat all 50 s,
-    // so the broader second try never ran.
-    first = await ask(aiValuationUserMessage(input), FIRST_TRY_MS)
-    // Second try, only when the first came up short and there is time left:
-    // the general kind of item instead of the (possibly misread) name.
-    const firstFound = verifiedListings(first.answer?.listings ?? [], first.results).length
-    if (firstFound < MIN_AI_SOURCES && VALUATION_DEADLINE_MS - (Date.now() - startedAt) > 15_000) {
-      second = await ask(aiValuationBroadMessage(input), VALUATION_DEADLINE_MS).catch(() => null)
+  // The exact item and the general kind of item are searched AT THE SAME
+  // TIME, each with the whole deadline. Run one after the other, a slow first
+  // try (a brand page with no price, a slow shop page) timed out and took the
+  // whole request with it; side by side, either one can still answer.
+  const [exact, broad] = await Promise.allSettled([
+    ask(aiValuationUserMessage(input), VALUATION_DEADLINE_MS),
+    ask(aiValuationBroadMessage(input), VALUATION_DEADLINE_MS),
+  ])
+  for (const r of [exact, broad]) {
+    if (r.status === "rejected") {
+      const error = r.reason
+      console.error(
+        "[ai-valuation] Claude call failed:",
+        error instanceof Anthropic.APIError ? `status ${error.status}` : "",
+        error instanceof Error ? error.message : "unknown error",
+      )
     }
-  } catch (error) {
-    console.error(
-      "[ai-valuation] Claude call failed:",
-      error instanceof Anthropic.APIError ? `status ${error.status}` : "",
-      error instanceof Error ? error.message : "unknown error",
-    )
-    return NextResponse.json(
-      {
-        error: AI_FALLBACK_MESSAGES.AI_UNAVAILABLE,
-        code: "AI_UNAVAILABLE",
-        baseline: baselineOf(baseline),
-      },
-      { status: 503 },
-    )
   }
+  const tries = [exact, broad].flatMap((r) => (r.status === "fulfilled" ? [r.value] : []))
+  if (tries.length === 0) {
+    // Both failed (timed out, overloaded): the standard estimate, not an
+    // error screen. The person can still post at the category's range.
+    return fallback("AI_UNAVAILABLE", baseline)
+  }
+  const first = tries[0]
+  const second = tries[1] ?? null
 
   // Both tries together: every priced page either one found, each checked
   // against the search results either one really returned.
-  const answer = second?.answer && (second.answer.listings.length > 0 || !first.answer) ? second.answer : first.answer ?? second?.answer ?? null
+  // The exact item's answer when it found prices; otherwise the general one.
+  const answer = first.answer?.listings.length ? first.answer : second?.answer ?? first.answer ?? null
   const resultBlocks = [...first.resultBlocks, ...(second?.resultBlocks ?? [])]
   const searchResults = [...first.results, ...(second?.results ?? [])]
   // A failed search comes back as an error object in place of the results
@@ -247,7 +244,8 @@ export async function POST(req: NextRequest) {
         results: searchResults.length,
         searchErrors,
         claimed: answer?.listings.length ?? null,
-        secondTry: second !== null,
+        tries: tries.length,
+        failed: 2 - tries.length,
         verified: listings.length,
         note: answer?.note.slice(0, 200) ?? null,
       }),

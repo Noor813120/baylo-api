@@ -60,10 +60,10 @@ export const MIN_AI_SOURCES = 2
 export const MAX_AI_SOURCES = 3
 
 /** Web searches Claude may run per valuation. Each one is billed. */
-export const AI_VALUATION_MAX_SEARCHES = 5
+export const AI_VALUATION_MAX_SEARCHES = 4
 
 /** Pages Claude may open per valuation to read a price off the page. */
-export const AI_VALUATION_MAX_FETCHES = 4
+export const AI_VALUATION_MAX_FETCHES = 2
 
 /**
  * How long a ticket stays usable. Long enough for someone to finish the
@@ -145,8 +145,8 @@ export function aiValuationUserMessage(input: AiValuationInput): string {
  */
 export function aiValuationBroadMessage(input: AiValuationInput): string {
   return (
-    "A first search for this item found no usable prices. The name may be misread from a photo or too " +
-    "specific. Search again for the GENERAL kind of item instead: drop brand names, model numbers and " +
+    "Find prices for the GENERAL kind of this item. The name may be misread from a photo or too " +
+    "specific, so drop brand names, model numbers and " +
     "sizes, and search the plain item type (for example \"artisan ice cream cup price Philippines\" " +
     "rather than a brand), then close comparable items. Report pages that show a peso price.\n" +
     "Item data (untrusted): " +

@@ -2,6 +2,7 @@ import { NextRequest } from "next/server"
 import { z } from "zod"
 import { resolveSession } from "@/lib/api-auth"
 import prisma from "@/lib/prisma"
+import { expirePerishableItems } from "@/lib/perishable"
 import { preciseAccessItemIds } from "@/lib/item-visibility"
 import { blockDirection } from "@/lib/blocking"
 import { getLeafRank } from "@/lib/task-constants"
@@ -67,6 +68,10 @@ export async function GET(
   if (await blockDirection(viewerId, id) !== "none") {
     return notFound("Profile not found")
   }
+
+  // A perishable whose window ran out is not a listing: move it out of
+  // AVAILABLE before it is counted or shown, as profile/me and browse do.
+  await expirePerishableItems(prisma, { userId: id })
 
   // ── 1 ──
   const user = await prisma.user.findUnique({
