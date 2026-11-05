@@ -8,14 +8,16 @@ import {
   AI_VALUATION_SOURCE,
   AI_VALUATION_SYSTEM_PROMPT,
   aiAllowed,
+  aiValuationBroadMessage,
   aiValuationUserMessage,
+  MIN_AI_SOURCES,
   decideAiValuation,
   issueTicket,
   parseAiValuationAnswer,
   verifiedListings,
   type AiFallbackReason,
 } from "@/lib/ai-valuation"
-import { anthropic, HAIKU_MODEL } from "@/lib/anthropic"
+import { anthropic, HAIKU_MODEL, NO_THINKING } from "@/lib/anthropic"
 import { resolveSession } from "@/lib/api-auth"
 import { enforceRateLimit } from "@/lib/rate-limit-config"
 import { categoryLabel, conditionLabel } from "@/lib/v1/taxonomy"
@@ -105,25 +107,19 @@ export async function POST(req: NextRequest) {
   // The guardrail. Same function, same range the create handler falls back to.
   const baseline = await valuate(category, condition)
 
-  // Every block of the turn, across pause_turn continuations.
-  const content: Anthropic.ContentBlock[] = []
-  let stopReason: string | null = null
+  const input = { title, categoryLabel: categoryLabel(category), conditionLabel: conditionLabel(condition) }
   const startedAt = Date.now()
-  try {
-    const messages: Anthropic.MessageParam[] = [
-      {
-        role: "user",
-        content: aiValuationUserMessage({
-          title,
-          categoryLabel: categoryLabel(category),
-          conditionLabel: conditionLabel(condition),
-        }),
-      },
-    ]
-    // A turn with several searches can come back as pause_turn: the server
-    // stopped mid-turn and the answer is not written yet. Send the partial
-    // turn back and it carries on. Bounded, and inside the app's 30-second
-    // request timeout.
+  let stopReason: string | null = null
+
+  /**
+   * One search-and-answer turn. A turn with several searches can come back
+   * as pause_turn: the server stopped mid-turn and the answer is not written
+   * yet, so the partial turn is sent back and it carries on. Bounded by the
+   * shared deadline, inside the app's 30-second request timeout.
+   */
+  const ask = async (userText: string) => {
+    const content: Anthropic.ContentBlock[] = []
+    const messages: Anthropic.MessageParam[] = [{ role: "user", content: userText }]
     for (let round = 0; round < 3; round++) {
       const remaining = VALUATION_DEADLINE_MS - (Date.now() - startedAt)
       if (remaining < 4_000) break
@@ -131,6 +127,9 @@ export async function POST(req: NextRequest) {
         {
           model: HAIKU_MODEL,
           max_tokens: 2048,
+          // Haiku 5.5 thinks by default; this is a search-and-report task on
+          // a fixed budget, so thinking stays off.
+          thinking: NO_THINKING,
           system: AI_VALUATION_SYSTEM_PROMPT,
           messages,
           tools: [
@@ -155,6 +154,29 @@ export async function POST(req: NextRequest) {
       if (message.stop_reason !== "pause_turn") break
       messages.push({ role: "assistant", content: message.content })
     }
+    // Joined with nothing: a cited answer arrives as several text blocks,
+    // and a block boundary can fall inside the JSON.
+    const text = content.filter((b): b is Anthropic.TextBlock => b.type === "text").map((b) => b.text).join("")
+    const resultBlocks = content.filter(
+      (b): b is Anthropic.WebSearchToolResultBlock => b.type === "web_search_tool_result",
+    )
+    return {
+      answer: parseAiValuationAnswer(text),
+      resultBlocks,
+      results: resultBlocks.flatMap((b) => (Array.isArray(b.content) ? b.content : [])),
+    }
+  }
+
+  let first: Awaited<ReturnType<typeof ask>>
+  let second: Awaited<ReturnType<typeof ask>> | null = null
+  try {
+    first = await ask(aiValuationUserMessage(input))
+    // Second try, only when the first came up short and there is time left:
+    // the general kind of item instead of the (possibly misread) name.
+    const firstFound = verifiedListings(first.answer?.listings ?? [], first.results).length
+    if (firstFound < MIN_AI_SOURCES && VALUATION_DEADLINE_MS - (Date.now() - startedAt) > 9_000) {
+      second = await ask(aiValuationBroadMessage(input)).catch(() => null)
+    }
   } catch (error) {
     console.error(
       "[ai-valuation] Claude call failed:",
@@ -171,22 +193,20 @@ export async function POST(req: NextRequest) {
     )
   }
 
-  // Joined with nothing: a cited answer arrives as several text blocks, and a
-  // block boundary can fall inside the JSON.
-  const textBlocks = content.filter((b): b is Anthropic.TextBlock => b.type === "text")
-  const answer = parseAiValuationAnswer(textBlocks.map((b) => b.text).join(""))
-
-  const resultBlocks = content.filter(
-    (b): b is Anthropic.WebSearchToolResultBlock => b.type === "web_search_tool_result",
-  )
-  const searchResults = resultBlocks.flatMap((b) => (Array.isArray(b.content) ? b.content : []))
+  // Both tries together: every priced page either one found, each checked
+  // against the search results either one really returned.
+  const answer = second?.answer && (second.answer.listings.length > 0 || !first.answer) ? second.answer : first.answer ?? second?.answer ?? null
+  const resultBlocks = [...first.resultBlocks, ...(second?.resultBlocks ?? [])]
+  const searchResults = [...first.results, ...(second?.results ?? [])]
   // A failed search comes back as an error object in place of the results
-  // list (max_uses_exceeded, too_many_requests, unavailable...). Before this
-  // it read as "no results" with nothing in the logs.
+  // list (max_uses_exceeded, too_many_requests, unavailable...).
   const searchErrors = resultBlocks.flatMap((b) =>
     Array.isArray(b.content) ? [] : [(b.content as { error_code?: string }).error_code ?? "unknown"],
   )
-  const listings = verifiedListings(answer?.listings ?? [], searchResults)
+  const listings = verifiedListings(
+    [...(first.answer?.listings ?? []), ...(second?.answer?.listings ?? [])],
+    searchResults,
+  )
 
   const decision = decideAiValuation(answer, listings, category, { min: baseline.min, max: baseline.max })
   if (!decision.ok) {
@@ -202,6 +222,7 @@ export async function POST(req: NextRequest) {
         results: searchResults.length,
         searchErrors,
         claimed: answer?.listings.length ?? null,
+        secondTry: second !== null,
         verified: listings.length,
         note: answer?.note.slice(0, 200) ?? null,
       }),

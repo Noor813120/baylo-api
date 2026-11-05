@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { resolveSession } from "@/lib/api-auth"
 import Anthropic from "@anthropic-ai/sdk"
+import { HAIKU_MODEL, NO_THINKING } from "@/lib/anthropic"
 import { isAllowedImageUrl } from "@/lib/safe-image-url"
 import { enforceRateLimit } from "@/lib/rate-limit-config"
 import { imageUrlSchema, parseBody } from "@/lib/validation"
@@ -73,7 +74,8 @@ export async function POST(req: NextRequest) {
 
   try {
     const message = await anthropic.messages.create({
-      model: "claude-haiku-4-5-20251001",
+      model: HAIKU_MODEL,
+      thinking: NO_THINKING,
       max_tokens: 512,
       messages: [{
         role: "user",

@@ -24,8 +24,20 @@ import Anthropic from "@anthropic-ai/sdk"
  * that cannot be imported.
  */
 
-/** Haiku 4.5, the tier image identification already runs on. */
-export const HAIKU_MODEL = "claude-haiku-4-5-20251001"
+/**
+ * Claude Haiku 5.5 (5 Nov 2026; was Haiku 4.5). The current Haiku, about a
+ * tenth of Haiku 4.5's per-token price at Baylo's prompt sizes, and better at
+ * following instructions and at using search.
+ *
+ * Two Haiku 5.5 rules every caller follows: no `temperature` / `top_p` /
+ * `top_k` (non-default values are a 400), and thinking is ON unless turned
+ * off. Every Baylo call is a short structured answer on a small max_tokens,
+ * so each passes NO_THINKING; left on, thinking would spend that budget.
+ */
+export const HAIKU_MODEL = "claude-haiku-5-5"
+
+/** Thinking off, for Baylo's short structured calls. See HAIKU_MODEL. */
+export const NO_THINKING = { type: "disabled" } as const
 
 let client: Anthropic | null = null
 
