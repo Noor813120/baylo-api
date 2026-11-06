@@ -210,8 +210,8 @@ export async function GET(req: NextRequest) {
       offeredItem: { select: { id: true, title: true, valueLeaves: true, images: ITEM_IMAGES } },
       requestedItem: { select: ITEM_BRIEF },
       // `rating` rides along for the trust tier; see `offerTiers` below.
-      sender: { select: { ...USER_BRIEF, rating: true } },
-      receiver: { select: { ...USER_BRIEF, rating: true } },
+      sender: { select: { ...USER_BRIEF, rating: true, idVerifiedGrandfatheredAt: true, _count: { select: { reviewsReceived: true } } } },
+      receiver: { select: { ...USER_BRIEF, rating: true, idVerifiedGrandfatheredAt: true, _count: { select: { reviewsReceived: true } } } },
     },
     orderBy: [{ createdAt: "desc" }, { id: "desc" }],
     take: MAX_LIMIT,
@@ -342,7 +342,16 @@ export async function GET(req: NextRequest) {
   // The other person's standing, so an offer inbox can rank and badge traders.
   // One batched lookup for every counterparty on the page.
   const offerCounterparties = offerRows.map((o) => (o.senderId === viewerId ? o.receiver : o.sender))
-  const offerTiers = await loadTrustTiers(prisma, offerCounterparties)
+  // Whose government ID is approved, in one read. Same rule as
+  // isIdVerified(): an APPROVED IdVerification row, or the grandfather stamp.
+  const [offerTiers, approvedIds] = await Promise.all([
+    loadTrustTiers(prisma, offerCounterparties),
+    prisma.idVerification.findMany({
+      where: { userId: { in: offerCounterparties.map((u) => u.id) }, status: "APPROVED" },
+      select: { userId: true },
+    }),
+  ])
+  const idVerifiedIds = new Set(approvedIds.map((r) => r.userId))
 
   const offers = offerRows.map((o) => {
     const isSender = o.senderId === viewerId
@@ -377,7 +386,12 @@ export async function GET(req: NextRequest) {
         name: other.name,
         avatar: other.avatar,
         rating: other.rating,
+        // How many reviews that rating is an average of, so the card can say
+        // "4.5 · 4 reviews" like the profile header does.
+        reviewCount: other._count.reviewsReceived,
         trustTier: offerTiers.get(other.id) ?? null,
+        // Government ID approved: the tier pill carries its checkmark only then.
+        idVerified: !!other.idVerifiedGrandfatheredAt || idVerifiedIds.has(other.id),
       },
       /**
        * THE BRIDGE, as the trades screen needs it.

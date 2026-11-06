@@ -289,10 +289,12 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
         if (!held.ok) throw new ReceiverShort(fee, held.have)
       }
 
-      const [offeredItem, requestedItem] = await Promise.all([
-        tx.item.findUnique({ where: { id: offeredItemId as string }, select: { title: true, status: true } }),
-        tx.item.findUnique({ where: { id: offer.requestedItemId }, select: { title: true, status: true } }),
-      ])
+      // One after the other, not Promise.all: an interactive transaction runs
+      // on ONE connection, and two queries at once on it is what pg logs as
+      // "client.query() when the client is already executing a query" --
+      // deprecated now, an error in pg 9.
+      const offeredItem = await tx.item.findUnique({ where: { id: offeredItemId as string }, select: { title: true, status: true } })
+      const requestedItem = await tx.item.findUnique({ where: { id: offer.requestedItemId }, select: { title: true, status: true } })
 
       if (offeredItem?.status !== "AVAILABLE" || requestedItem?.status !== "AVAILABLE") {
         throw new Error("item_unavailable")

@@ -10,6 +10,10 @@ const eslintConfig = defineConfig([
   // differently today -- most hits are Date.now() in server components and the
   // retired /dashboard web UI. Warnings, not errors, until the compiler is on.
   {
+    // The same files eslint-config-next registers the react-hooks plugin for.
+    // Without this the block also matched files that plugin does not cover,
+    // and ESLint stopped with "could not find plugin react-hooks".
+    files: ["**/*.{js,jsx,mjs,ts,tsx,mts,cts}"],
     rules: {
       "react-hooks/purity": "warn",
       "react-hooks/refs": "warn",
