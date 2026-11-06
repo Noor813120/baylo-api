@@ -190,31 +190,19 @@ export async function enforcePremiumForListing(
 // ── The item-value ceiling ───────────────────────────────────────────────────
 
 /**
- * Caps the value of an item the user is about to ACQUIRE.
+ * Caps the bracket of an item the user is about to ACQUIRE, when the tier has a
+ * cap (`limits.maxItemBracket`).
  *
- * Applied to what they receive, never to what they give: the exposure being
- * capped belongs to the counterparty handing over the item, not to the user
- * handing over their own.
+ * NO TIER HAS ONE since Nov 2026: every tier's `maxItemBracket` is null, so
+ * this returns null (allowed) for every ordinary trader, as it already did for
+ * Top Traders and verified shops. The trust tier no longer limits which items a
+ * user may trade for. The gap rule (one bracket) and the Premium gate
+ * (Bracket 7+) still do. The function stays so a cap can be reinstated by
+ * setting a tier's `maxItemBracket` in @/lib/reputation-config.
  *
- * Applies on BOTH the initiate and accept paths. Reaching for a 5,000-Leaf
- * item is the same reach whoever started the conversation, and a cap that only
- * bound initiators would be avoided by asking the other party to send the
- * offer.
- *
- * ── IT COMPARES BRACKETS, NOT LEAVES ────────────────────────────────────────
- *
- * The cap was a Leaves figure and was quoted as one: `"Air Max" is valued at
- * 480 Leaves`. That was the last place in the offer flow that printed another
- * person's exact value, which is what the bracket presentation exists to
- * prevent -- but simply rewording it produced a worse sentence, because 600
- * sits in the middle of bracket 4 and the refusal then read `is in Bracket 4
- * ... up to Bracket 4`. Two tiles both reading "Bracket 4", one tradeable and
- * one not, with nothing on screen to tell them apart.
- *
- * So the CAP ITSELF is a bracket now -- rounded DOWN, so that rewording a
- * limit can never loosen it; see TIER_MAX_ITEM_BRACKET -- and this compares
- * brackets on both sides. The Leaves figure survives in the config as the
- * thing the bracket is derived from.
+ * When a cap is set it applies to what the user RECEIVES, on both the initiate
+ * and accept paths, and it compares brackets, not Leaves, so a refusal never
+ * prints another person's exact value.
  *
  * An item with a NULL valueLeaves passes here, and cannot reach a trade
  * anyway — see the note on the premium gate.
@@ -310,8 +298,7 @@ export async function enforceAcceptTrade(
  * `maxItemValueBracket` REPLACED `maxItemValueLeaves`. The client used the raw
  * figure to draw "a New Trader can trade for up to 600" beside a listing whose
  * exact value it was not supposed to show; the bracket says the same thing in
- * the vocabulary the rest of the flow speaks. The Leaves figure stays
- * server-side, in TIER_LIMITS, where the comparison is actually made.
+ * the vocabulary the rest of the flow speaks. Both are null for every tier now.
  *
  * The `contracts` block and `restrictions.canInitiateTrades` are gone with
  * deferred agreements. A client reading this payload can no longer be told
