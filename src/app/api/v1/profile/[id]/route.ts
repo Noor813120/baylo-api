@@ -8,6 +8,7 @@ import { blockDirection } from "@/lib/blocking"
 import { getLeafRank } from "@/lib/task-constants"
 import { loadTrustTiers } from "@/lib/trust-tiers"
 import { ORG_PUBLIC_SELECT, orgBadge } from "@/lib/organizations"
+import { isIdVerified } from "@/lib/id-verification"
 import { ok, unauthenticated, invalid, notFound } from "@/lib/v1/envelope"
 import { parseQuery, paginationShape } from "@/lib/v1/query"
 import { decodeCursor, encodeCursor, olderThan, paginate } from "@/lib/v1/cursor"
@@ -116,8 +117,9 @@ export async function GET(
   // 404 here matches resolveSession(), which refuses to authenticate one.
   if (!user || user.deletedAt) return notFound("Profile not found")
 
-  const [tiers, displayedAchievements] = await Promise.all([
+  const [tiers, idVerified, displayedAchievements] = await Promise.all([
     loadTrustTiers(prisma, [{ id: user.id, rating: user.rating }]),
+    isIdVerified(user.id),
     prisma.$queryRaw<Array<{
       id: string
       name: string
@@ -240,6 +242,12 @@ export async function GET(
             }
           : null,
         isVerified: user.isVerified,
+        /**
+         * Government ID approved (or grandfathered) -- NOT `isVerified`, which
+         * only means the email was confirmed. The profile's trust-tier pill
+         * shows its checkmark only when this is true.
+         */
+        idVerified,
         createdAt: user.createdAt,
         // NOT returned, and deliberately: email, leaves, tasks, impact.
       },
