@@ -1,4 +1,4 @@
-import { NextRequest } from "next/server"
+import { NextRequest, after } from "next/server"
 import { resolveSession } from "@/lib/api-auth"
 import prisma from "@/lib/prisma"
 import { ok, unauthenticated, notFound, forbidden, conflict, fail } from "@/lib/v1/envelope"
@@ -41,30 +41,40 @@ async function arrived(req: NextRequest, { params }: { params: Promise<{ id: str
   const partnerId = trade.senderId === me ? trade.receiverId : trade.senderId
   const hubName = trade.meetupHub?.name ?? null
 
-  const already = await hasArrived(trade.id, me)
+  // Both arrivals in one round trip; the slow, non-essential sends (the bell
+  // row that pushes, two Pusher events) run AFTER the response (7 Nov 2026),
+  // so "I'm here" answers as soon as the arrival is written.
+  const [already, partner] = await Promise.all([hasArrived(trade.id, me), hasArrived(trade.id, partnerId)])
   if (!already) {
     await recordArrival({ tradeId: trade.id, userId: me, partnerId, hubName })
-    // The push. The bell row is what triggers it (see @/lib/prisma); a failed
-    // notification must not undo an arrival that is already recorded.
-    await prisma.notification
-      .create({
-        data: {
-          userId: partnerId,
-          type: "MEETUP_AGREED",
-          message: hubName ? `is at ${hubName}` : "is at the hub",
-          actorId: me,
-          entityType: "meetup",
-          entityId: trade.id,
-        },
-      })
-      .catch(() => undefined)
-    const changed = { tradeId: trade.id, newStatus: trade.status, arrived: me }
-    await Promise.all([
-      notifyUser(partnerId, "trade-status-changed", changed),
-      notifyUser(me, "trade-status-changed", changed),
-    ])
+    const status = trade.status
+    const tell = async () => {
+      // The push. The bell row is what triggers it (see @/lib/prisma); a
+      // failed notification must not undo an arrival that is recorded.
+      await prisma.notification
+        .create({
+          data: {
+            userId: partnerId,
+            type: "MEETUP_AGREED",
+            message: hubName ? `is at ${hubName}` : "is at the hub",
+            actorId: me,
+            entityType: "meetup",
+            entityId: trade.id,
+          },
+        })
+        .catch(() => undefined)
+      const changed = { tradeId: trade.id, newStatus: status, arrived: me }
+      await Promise.all([
+        notifyUser(partnerId, "trade-status-changed", changed),
+        notifyUser(me, "trade-status-changed", changed),
+      ])
+    }
+    try {
+      after(tell)
+    } catch {
+      await tell()
+    }
   }
 
-  const partner = await hasArrived(trade.id, partnerId)
   return ok({ arrival: { me: true, partner } })
 }
