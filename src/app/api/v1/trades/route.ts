@@ -10,6 +10,7 @@ import { resolveTradeViewer } from "@/lib/trade-participant"
 import { parseQuery, paginationShape, MAX_LIMIT } from "@/lib/v1/query"
 import { decodeCursor, encodeCursor, paginate, cursorDate } from "@/lib/v1/cursor"
 import { SAFE_ZONE_HUB_SELECT, v1Hub, type SafeZoneHubRow } from "@/lib/safe-zones"
+import { ARRIVAL_WINDOW_MS } from "@/lib/arrival"
 import { MEETUP_SELECT, v1MeetupPlan } from "@/lib/meetup"
 import { MAX_CODE_ATTEMPTS } from "@/lib/swap-code"
 import { ITEM_IMAGES, toImageUrls, type ImagesLike } from "@/lib/item-images"
@@ -167,6 +168,7 @@ export async function GET(req: NextRequest) {
       ...MEETUP_SELECT,
       // When the deal became a trade; the wire's `createdAt` (see below).
       tradeCreatedAt: true,
+      completedAt: true,
       updatedAt: true,
       senderId: true,
       receiverId: true,
@@ -237,14 +239,67 @@ export async function GET(req: NextRequest) {
     select: { tradeId: true, amount: true, type: true, task: true, description: true },
     orderBy: { createdAt: "asc" },
   })
-  const rewardLines = new Map<string, { kind: string; leaves: number; note: string | null }[]>()
+  const rewardLines = new Map<
+    string,
+    { kind: string; leaves: number; note: string | null; reason: "repeat_partner" | "weekly_cap" | null }[]
+  >()
   for (const row of rewardRows) {
     if (!row.tradeId) continue
     const kind = row.type === "TRADE_REWARD" ? "TRADE" : String(row.task ?? "TASK")
     const list = rewardLines.get(row.tradeId) ?? []
-    list.push({ kind, leaves: row.amount, note: row.amount === 0 ? row.description : null })
+    list.push({ kind, leaves: row.amount, note: row.amount === 0 ? row.description : null, reason: null })
     rewardLines.set(row.tradeId, list)
   }
+
+  // WHICH RULE DENIED A 0-LEAF TASK LINE. The ledger records "denied" but not
+  // why, and the two rules need different words. Re-ask the partner question
+  // awardTask() asked (same 30-day window, same completedAt anchor): another
+  // completed trade with this partner shortly before this one means
+  // repeat_partner; otherwise it was the weekly cap.
+  for (const t of page) {
+    const lines = rewardLines.get(t.id)
+    if (!lines?.some((l) => l.leaves === 0 && l.kind !== "TRADE")) continue
+    const partnerId = t.senderId === viewerId ? t.receiverId : t.senderId
+    const at = t.completedAt ?? t.updatedAt
+    const prior = await prisma.trade.findFirst({
+      where: {
+        id: { not: t.id },
+        status: "COMPLETED",
+        AND: [
+          { OR: [{ senderId: viewerId, receiverId: partnerId }, { senderId: partnerId, receiverId: viewerId }] },
+          {
+            OR: [
+              { completedAt: { gte: new Date(at.getTime() - 30 * 86_400_000), lt: at } },
+              { completedAt: null, updatedAt: { gte: new Date(at.getTime() - 30 * 86_400_000), lt: at } },
+            ],
+          },
+        ],
+      },
+      select: { id: true },
+    })
+    for (const l of lines) {
+      if (l.leaves === 0 && l.kind !== "TRADE") l.reason = prior ? "repeat_partner" : "weekly_cap"
+    }
+  }
+
+  // "I'm here" at the hub, per live trade, within the arrival window. See
+  // @/lib/arrival; the key is arrived:<tradeId>:<userId>:<bucket>.
+  const liveIds = page.filter((t) => t.status === "ACCEPTED" || t.status === "CONFIRMING").map((t) => t.id)
+  const arrivalRows = liveIds.length
+    ? await prisma.message.findMany({
+        where: {
+          tradeId: { in: liveIds },
+          systemEventKey: { startsWith: "arrived:" },
+          createdAt: { gte: new Date(Date.now() - ARRIVAL_WINDOW_MS) },
+        },
+        select: { systemEventKey: true },
+      })
+    : []
+  const arrivedSet = new Set(arrivalRows.map((r) => (r.systemEventKey ?? "").split(":").slice(1, 3).join(":")))
+  const arrivalFor = (tradeId: string, partnerId: string) => ({
+    me: arrivedSet.has(`${tradeId}:${viewerId}`),
+    partner: arrivedSet.has(`${tradeId}:${partnerId}`),
+  })
   const rewardTotal = (id: string) => {
     const list = rewardLines.get(id)
     if (!list) return null
@@ -307,6 +362,8 @@ export async function GET(req: NextRequest) {
       rewardLeaves: rewardTotal(t.id),
       /** Each reward line for this trade, including 0-Leaf denials with their reason. */
       rewards: rewardLines.get(t.id) ?? [],
+      /** Who has tapped "I'm here" at the hub in the last two hours. See @/lib/arrival. */
+      arrival: arrivalFor(t.id, t.senderId === viewerId ? t.receiverId : t.senderId),
       codesMatchedAt: t.status === "COMPLETED" ? t.updatedAt : null,
       /*
        * ── SUPPRESSED ONLY WHEN IT IS ACTUALLY A PLACEHOLDER ────────────────
