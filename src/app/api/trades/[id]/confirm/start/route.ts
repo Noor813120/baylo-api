@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from "next/server"
+import { NextRequest, NextResponse, after } from "next/server"
 import { resolveSession } from "@/lib/api-auth"
 import prisma from "@/lib/prisma"
 import bcrypt from "bcryptjs"
@@ -151,9 +151,11 @@ export async function POST(
       }),
     ])
 
-    // Email each participant their own code.
-    // Use allSettled so an SMTP failure doesn't crash the response — codes are
-    // already saved in the DB, so the flow can still proceed.
+    // Email each participant their own code -- AFTER the response (7 Nov
+    // 2026). Waiting on Gmail SMTP added one to three seconds to opening the
+    // codes, which are already on screen (sealed copy, confirm/status); the
+    // email is the backup. allSettled so an SMTP failure is only logged.
+    const sendEmails = async () => {
     const emailResults = await Promise.allSettled([
       sendSwapConfirmationCode(
         trade.sender.email,
@@ -172,6 +174,13 @@ export async function POST(
     ])
     for (const r of emailResults) {
       if (r.status === "rejected") console.error("[confirm/start] email error:", r.reason)
+    }
+    }
+    try {
+      after(sendEmails)
+    } catch {
+      // Outside a request (a script): send now.
+      await sendEmails()
     }
 
     return NextResponse.json({ started: true })
