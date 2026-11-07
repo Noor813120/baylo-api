@@ -174,6 +174,25 @@ export async function POST(req: NextRequest) {
       data: { read: true },
     })
 
+    // ONE unread "sent you a message" row per sender: the older ones were just
+    // marked read above. Creating it is what sends the PUSH -- the Prisma hook
+    // in @/lib/prisma calls @/lib/push on every notification.create -- and
+    // without it a chat reached the phone only while the app was open
+    // (Pusher). The bell still hides these rows (excludeDirectMessageNotifications
+    // in @/lib/inbox), a muted chat is still filtered in @/lib/push, and the
+    // push text is "<name> sent you a message", never the message body.
+    await prisma.notification.create({
+      data: {
+        userId: receiverId,
+        actorId: senderId,
+        type: "NEW_MESSAGE",
+        message: "sent you a message",
+        link: `/dashboard/messages?partner=${encodeURIComponent(senderId)}`,
+        entityType: "conversation",
+        entityId: senderId,
+      },
+    })
+
     // The backing row carries the shop's name and its logo in `avatar`; the
     // session carries the person's. Only the shop case costs a read.
     const shop = inbox.acting.organization

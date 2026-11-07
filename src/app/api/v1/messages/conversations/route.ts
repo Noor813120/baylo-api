@@ -132,6 +132,7 @@ export async function GET(req: NextRequest) {
       content: true,
       createdAt: true,
       senderId: true,
+      systemEventKey: true,
       sender: { select: { id: true, name: true, avatar: true } },
       receiver: { select: { id: true, name: true, avatar: true } },
     },
@@ -153,7 +154,12 @@ export async function GET(req: NextRequest) {
         content: message.content,
         lastMessageAt: message.createdAt.toISOString(),
         unreadCount: Number(thread.unreadCount ?? 0),
-        fromMe: message.senderId === viewerId,
+        // A system event ("Trade completed", an offer update) is written as a
+        // PAIR of Message rows, one in each direction, so the newest one is
+        // often "sent" by the viewer. It is nobody's message: the list must
+        // not read it as "You: Trade completed".
+        system: message.systemEventKey != null,
+        fromMe: message.systemEventKey == null && message.senderId === viewerId,
       },
     ]
   })

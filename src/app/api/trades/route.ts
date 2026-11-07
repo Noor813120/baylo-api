@@ -360,6 +360,10 @@ export async function PATCH(req: NextRequest) {
           message: `accepted your trade request for "${trade.requestedItem.title}"`,
           link:    `/dashboard/trades`,
           actorId: myId,
+          // Without the pair the phone had nowhere to route the tap (push-target
+          // returned null and the app just opened). Same pair the offer path writes.
+          entityType: "trade",
+          entityId: tradeId,
         },
       })
 
