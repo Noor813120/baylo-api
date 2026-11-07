@@ -5,6 +5,7 @@ import bcrypt from "bcryptjs"
 import { randomInt } from "crypto"
 import { sendSwapConfirmationCode } from "@/lib/mailer"
 import { MAX_CODE_ATTEMPTS } from "@/lib/swap-code"
+import { arrivals } from "@/lib/arrival"
 import { sealCode } from "@/lib/swap-code-seal"
 import {
   isShopMemberPair, legacyParticipantRefusal, resolveTradeParticipant, shopMemberSelfTradeRefusal,
@@ -81,6 +82,27 @@ export async function POST(
     })
     if (existing.length === 2) {
       return NextResponse.json({ started: true, alreadyStarted: true })
+    }
+
+    // BOTH AT THE HUB FIRST (7 Nov 2026). New codes are issued only once each
+    // side has said "I'm here" (POST /api/v1/trades/:id/arrived) within the
+    // last two hours. Before, the first person to open the codes started both
+    // 15-minute windows while the other was still on the way. Codes already
+    // live are returned above, untouched.
+    const here = await arrivals(tradeId, trade.senderId, trade.receiverId)
+    if (!here.sender || !here.receiver) {
+      const waitingOn = !here.sender ? trade.sender : trade.receiver
+      const mine = myId === trade.senderId ? here.sender : here.receiver
+      return NextResponse.json(
+        {
+          error: mine
+            ? `Waiting for ${waitingOn?.name?.split(/\s+/)[0] ?? "your trading partner"} to arrive. The codes start when you're both at the hub.`
+            : "Tap \"I'm here\" when you reach the hub. The codes start when you're both there.",
+          code: "PARTNER_NOT_ARRIVED",
+          arrival: { me: mine, partner: myId === trade.senderId ? here.receiver : here.sender },
+        },
+        { status: 409 },
+      )
     }
 
     // Generate a 6-digit code for each participant, hash with bcrypt.
