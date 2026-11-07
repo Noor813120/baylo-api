@@ -223,15 +223,34 @@ export async function GET(req: NextRequest) {
   })
 
   const now = Date.now()
+  // EVERY reward this trade earned the viewer: the trade reward AND the task
+  // rewards filed under the same trade (Safe-Zone meetup, First trade). Only
+  // TRADE_REWARD was read before, so a paid Safe-hub bonus showed as "None".
+  // A 0-Leaf TASK_REWARD row is a recorded denial (repeat partner, weekly
+  // cap) and is returned with its reason so the summary can say why.
   const rewardRows = await prisma.leafTransaction.findMany({
     where: {
       tradeId: { in: page.map((trade) => trade.id) },
       userId: viewerId,
-      type: "TRADE_REWARD",
+      type: { in: ["TRADE_REWARD", "TASK_REWARD"] },
     },
-    select: { tradeId: true, amount: true },
+    select: { tradeId: true, amount: true, type: true, task: true, description: true },
+    orderBy: { createdAt: "asc" },
   })
-  const rewards = new Map(rewardRows.map((row) => [row.tradeId, row.amount]))
+  const rewardLines = new Map<string, { kind: string; leaves: number; note: string | null }[]>()
+  for (const row of rewardRows) {
+    if (!row.tradeId) continue
+    const kind = row.type === "TRADE_REWARD" ? "TRADE" : String(row.task ?? "TASK")
+    const list = rewardLines.get(row.tradeId) ?? []
+    list.push({ kind, leaves: row.amount, note: row.amount === 0 ? row.description : null })
+    rewardLines.set(row.tradeId, list)
+  }
+  const rewardTotal = (id: string) => {
+    const list = rewardLines.get(id)
+    if (!list) return null
+    const sum = list.reduce((n, r) => n + Math.max(0, r.leaves), 0)
+    return sum > 0 ? sum : null
+  }
 
   const trades = page.map((t) => {
     const isSender = t.senderId === viewerId
@@ -285,7 +304,9 @@ export async function GET(req: NextRequest) {
       receivedReview: t.reviews.find((review) => review.reviewerId !== viewerId)
         ? { rating: t.reviews.find((review) => review.reviewerId !== viewerId)!.rating }
         : null,
-      rewardLeaves: rewards.get(t.id) ?? null,
+      rewardLeaves: rewardTotal(t.id),
+      /** Each reward line for this trade, including 0-Leaf denials with their reason. */
+      rewards: rewardLines.get(t.id) ?? [],
       codesMatchedAt: t.status === "COMPLETED" ? t.updatedAt : null,
       /*
        * ── SUPPRESSED ONLY WHEN IT IS ACTUALLY A PLACEHOLDER ────────────────

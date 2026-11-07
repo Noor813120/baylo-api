@@ -241,8 +241,18 @@ export async function GET(
     viewer: {
       isOwner,
       state: item.status,
+      // The OWNER's action follows the item's state too. It used to be "EDIT"
+      // whatever the status, so an item acquired in a trade (OWNED, not on the
+      // market) offered Edit / See offers and no way to list it again. An app
+      // that predates "RELIST" falls back to its Edit branch, as before.
       action: isOwner
-        ? "EDIT"
+        ? item.status === "OWNED"
+          ? "RELIST"
+          : item.status === "IN_TRADE"
+            ? "IN_TRADE"
+            : item.status === "TRADED"
+              ? "TRADED"
+              : "EDIT"
         : item.status === "IN_TRADE"
           ? "IN_TRADE"
           : item.status === "TRADED"

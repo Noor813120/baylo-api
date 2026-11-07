@@ -525,8 +525,20 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
         receiverId: offer.receiverId,
       }),
     })
+    // An ACCEPT made a trade. Both phones' trade lists listen for
+    // trade-status-changed (useTradeRealtime); without it the proposer's cached
+    // list still held the row under offers[], and tapping the "accepted" push
+    // opened /trade?id=… on a list with no such trade: "That trade is not open
+    // any more", for a trade that was.
+    const tradeChanged = tradeRecord
+      ? [
+          notifyUser(offer.senderId, "trade-status-changed", { tradeId: tradeRecord.id, newStatus: "ACCEPTED" }),
+          notifyUser(offer.receiverId, "trade-status-changed", { tradeId: tradeRecord.id, newStatus: "ACCEPTED" }),
+        ]
+      : []
     await Promise.all([
       bellNotified,
+      ...tradeChanged,
       notifyUser(offer.senderId, "new-message", senderSystemPayload),
       ...(receiverSystemPayload ? [
         notifyUser(offer.receiverId, "new-message", receiverSystemPayload),
