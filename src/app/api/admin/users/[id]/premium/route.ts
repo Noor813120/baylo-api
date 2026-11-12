@@ -5,6 +5,7 @@ import prisma from "@/lib/prisma"
 import { ok, notFound, conflict } from "@/lib/v1/envelope"
 import { parseJsonBody } from "@/lib/v1/body"
 import { PREMIUM_LIFETIME_UNTIL } from "@/lib/premium"
+import { evaluateAchievements } from "@/lib/achievements"
 
 export const dynamic = "force-dynamic"
 
@@ -50,6 +51,16 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       })
     }
   })
+
+  // THE PREMIUM MEMBER BADGE IS UNLOCKED AT THE GRANT (13 Nov 2026). Badges
+  // are only ever granted when somebody evaluates them, and the one place that
+  // happened was the person opening their Achievements screen -- so a member
+  // activated by an admin had no badge until they happened to. Evaluating here
+  // writes the same row that screen would have written, just now. It reads
+  // what is live (a PREMIUM_SUBSCRIBER badge, once earned, stays earned), so
+  // ending Premium needs nothing, and it never throws: a failure costs the
+  // badge arriving late, as before, and not the grant.
+  if (action === "grant") await evaluateAchievements(id)
 
   return ok({ user: { id, premium: action === "grant", lifetime: action === "grant" } })
 }

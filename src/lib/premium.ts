@@ -79,3 +79,18 @@ export function isLifetimePremium(premiumUntil: Date | null | undefined): boolea
 export function isVip(vipUntil: Date | null | undefined, now: Date = new Date()): boolean {
   return vipUntil != null && vipUntil.getTime() > now.getTime()
 }
+
+/**
+ * "Does this person have at least Premium access right now": a live Premium
+ * term OR a live VIP term, VIP being a superset. The expression every gate
+ * already spells out by hand (offer-check, the assistant, achievements), as one
+ * call for the readers that only need the yes/no -- the PREMIUM tag beside a
+ * name, which is why it takes the Subscription rows a user was loaded with and
+ * nothing else.
+ */
+export function hasPremiumAccess(
+  subs: SubscriptionRow[] | null | undefined,
+  now: Date = new Date(),
+): boolean {
+  return isPremium(premiumUntil(subs), now) || isVip(vipUntil(subs), now)
+}
