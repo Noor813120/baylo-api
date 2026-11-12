@@ -148,6 +148,12 @@ async function main() {
   const views = await prisma.storyView.count({ where: { storyId: b1id, viewerId: alice.id } })
   check("exactly one StoryView row after two marks", views === 1, `got ${views}`)
 
+  // The cut (12 Nov 2026). Bob's story is the newest one live, so a row with
+  // room for ONE story must be his -- before the fix it was the oldest.
+  const cut = await listStoryRow(prisma, alice.id, new Date(), 1)
+  const kept = cut.flatMap((g) => g.stories.map((st) => st.id))
+  check("a full row keeps the NEWEST story and drops older ones", kept.length === 1 && kept[0] === b1id, JSON.stringify(kept))
+
   row = await listStoryRow(prisma, alice.id)
   const order = row.map((g) => g.user.id)
   check("unseen (Carol) sorts before seen (Bob)", order.indexOf(carol.id) < order.indexOf(bob.id), JSON.stringify(order))
