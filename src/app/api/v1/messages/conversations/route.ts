@@ -3,6 +3,7 @@ import { z } from "zod"
 import { Prisma } from "@/generated/prisma/client"
 import { resolveSession } from "@/lib/api-auth"
 import prisma from "@/lib/prisma"
+import { SUBSCRIPTION_SELECT, hasPremiumAccess } from "@/lib/premium"
 import { ok, fail, unauthenticated, invalid } from "@/lib/v1/envelope"
 import { resolveInbox } from "@/lib/inbox"
 import { clearedAt } from "@/lib/chat-prefs"
@@ -133,8 +134,8 @@ export async function GET(req: NextRequest) {
       createdAt: true,
       senderId: true,
       systemEventKey: true,
-      sender: { select: { id: true, name: true, avatar: true } },
-      receiver: { select: { id: true, name: true, avatar: true } },
+      sender: { select: { id: true, name: true, avatar: true, subscriptions: SUBSCRIPTION_SELECT } },
+      receiver: { select: { id: true, name: true, avatar: true, subscriptions: SUBSCRIPTION_SELECT } },
     },
   })
   const byId = new Map(messages.map((m) => [m.id, m]))
@@ -150,6 +151,8 @@ export async function GET(req: NextRequest) {
         partnerId: partner.id,
         partnerName: partner.name ?? "User",
         partnerAvatar: partner.avatar ?? null,
+        // Premium or VIP now: the gold PREMIUM tag beside the name.
+        partnerPremium: hasPremiumAccess(partner.subscriptions),
         lastMessageId: message.id,
         content: message.content,
         lastMessageAt: message.createdAt.toISOString(),

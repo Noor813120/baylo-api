@@ -2,6 +2,7 @@ import { Prisma, type PrismaClient } from "@/generated/prisma/client"
 import { userNotBlocked, visibleItemWhere } from "@/lib/blocking"
 import { notSuspendedWhere } from "@/lib/moderation"
 import { notAnOrgWhere } from "@/lib/organizations"
+import { SUBSCRIPTION_SELECT, hasPremiumAccess } from "@/lib/premium"
 import {
   V1_ITEM_OWNER_SELECT,
   V1_ITEM_SAFEZONE_SELECT,
@@ -144,7 +145,8 @@ export interface StoryWire {
 }
 
 export interface StoryAuthorWire {
-  user: { id: string; name: string; avatar: string | null }
+  /** `premium`: Premium or VIP now, for the gold tag beside the name. */
+  user: { id: string; name: string; avatar: string | null; premium: boolean }
   isOwn: boolean
   /** Every story seen (always true for your own). Drives the grey ring. */
   allSeen: boolean
@@ -181,7 +183,7 @@ export async function listStoryRow(
       caption: true,
       createdAt: true,
       expiresAt: true,
-      user: { select: { id: true, name: true, avatar: true } },
+      user: { select: { id: true, name: true, avatar: true, subscriptions: SUBSCRIPTION_SELECT } },
       item: {
         select: { ...V1_ITEM_SELECT, user: { select: V1_ITEM_OWNER_SELECT }, ...V1_ITEM_SAFEZONE_SELECT },
       },
@@ -206,7 +208,7 @@ export async function listStoryRow(
     const seen = isOwn || r.views.length > 0
     let group = byAuthor.get(r.user.id)
     if (!group) {
-      group = { user: r.user, isOwn, allSeen: true, stories: [], latest: 0 }
+      group = { user: { id: r.user.id, name: r.user.name, avatar: r.user.avatar, premium: hasPremiumAccess(r.user.subscriptions) }, isOwn, allSeen: true, stories: [], latest: 0 }
       byAuthor.set(r.user.id, group)
     }
     group.stories.push({

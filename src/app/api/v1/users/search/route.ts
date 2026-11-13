@@ -4,6 +4,7 @@ import { resolveSession } from "@/lib/api-auth"
 import { userNotBlocked } from "@/lib/blocking"
 import { notSuspendedWhere } from "@/lib/moderation"
 import prisma from "@/lib/prisma"
+import { SUBSCRIPTION_SELECT, hasPremiumAccess } from "@/lib/premium"
 import { ORG_PUBLIC_SELECT, orgBadge } from "@/lib/organizations"
 import { loadTrustTiers } from "@/lib/trust-tiers"
 import { decodeCursor, encodeCursor, paginate } from "@/lib/v1/cursor"
@@ -63,6 +64,7 @@ export async function GET(req: NextRequest) {
       totalTrades: true,
       _count: { select: { reviewsReceived: true } },
       organization: { select: ORG_PUBLIC_SELECT },
+      subscriptions: SUBSCRIPTION_SELECT,
     },
     orderBy: [{ name: "asc" }, { id: "asc" }],
     take: limit + 1,
@@ -86,6 +88,7 @@ export async function GET(req: NextRequest) {
         totalTrades: user.totalTrades,
         trustTier: user.organization ? null : tiers.get(user.id) ?? null,
         org: user.organization ? orgBadge(user.organization) : null,
+        premium: hasPremiumAccess(user.subscriptions),
       })),
     },
     { nextCursor },

@@ -2,6 +2,7 @@ import { NextRequest } from "next/server"
 import { z } from "zod"
 import { resolveSession } from "@/lib/api-auth"
 import prisma from "@/lib/prisma"
+import { SUBSCRIPTION_SELECT, hasPremiumAccess } from "@/lib/premium"
 import { preciseAccessItemIds } from "@/lib/item-visibility"
 import { visibleItemWhere, userNotBlocked } from "@/lib/blocking"
 import { notSuspendedWhere } from "@/lib/moderation"
@@ -279,6 +280,7 @@ export async function GET(req: NextRequest) {
       },
       select: {
         id: true, name: true, avatar: true, totalTrades: true,
+        subscriptions: SUBSCRIPTION_SELECT,
         items: {
           where: { status: "AVAILABLE", moderationHiddenAt: null },
           select: { category: true },
@@ -303,6 +305,7 @@ export async function GET(req: NextRequest) {
       userId: u.id,
       name: u.name,
       avatar: u.avatar,
+      premium: hasPremiumAccess(u.subscriptions),
       totalTrades: u.totalTrades,
       sharedCategories: shared,
       reason: matchReason(shared, cats[0]),
