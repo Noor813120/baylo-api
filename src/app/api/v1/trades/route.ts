@@ -14,6 +14,7 @@ import { ARRIVAL_WINDOW_MS } from "@/lib/arrival"
 import { MEETUP_SELECT, v1MeetupPlan } from "@/lib/meetup"
 import { MAX_CODE_ATTEMPTS } from "@/lib/swap-code"
 import { ITEM_IMAGES, toImageUrls, type ImagesLike } from "@/lib/item-images"
+import { SUBSCRIPTION_SELECT, hasPremiumAccess } from "@/lib/premium"
 
 export const dynamic = "force-dynamic"
 
@@ -88,6 +89,8 @@ const ITEM_BRIEF = {
   valueLeaves: true,
 } as const
 const USER_BRIEF = { id: true, name: true, avatar: true } as const
+/** USER_BRIEF plus what decides the PREMIUM tag; the rows never reach the wire. */
+const USER_BRIEF_PREMIUM = { ...USER_BRIEF, subscriptions: SUBSCRIPTION_SELECT } as const
 
 export async function GET(req: NextRequest) {
   const session = await resolveSession()
@@ -172,8 +175,8 @@ export async function GET(req: NextRequest) {
       updatedAt: true,
       senderId: true,
       receiverId: true,
-      sender: { select: USER_BRIEF },
-      receiver: { select: USER_BRIEF },
+      sender: { select: USER_BRIEF_PREMIUM },
+      receiver: { select: USER_BRIEF_PREMIUM },
       // The two ids as well as the rows. A pure-Leaves trade stores the LISTING
       // in both columns as a placeholder, and comparing them is the only way to
       // tell that apart from a real item offered alongside Leaves. See the note
@@ -212,8 +215,8 @@ export async function GET(req: NextRequest) {
       offeredItem: { select: { id: true, title: true, valueLeaves: true, images: ITEM_IMAGES } },
       requestedItem: { select: ITEM_BRIEF },
       // `rating` rides along for the trust tier; see `offerTiers` below.
-      sender: { select: { ...USER_BRIEF, rating: true, idVerifiedGrandfatheredAt: true, _count: { select: { reviewsReceived: true } } } },
-      receiver: { select: { ...USER_BRIEF, rating: true, idVerifiedGrandfatheredAt: true, _count: { select: { reviewsReceived: true } } } },
+      sender: { select: { ...USER_BRIEF_PREMIUM, rating: true, idVerifiedGrandfatheredAt: true, _count: { select: { reviewsReceived: true } } } },
+      receiver: { select: { ...USER_BRIEF_PREMIUM, rating: true, idVerifiedGrandfatheredAt: true, _count: { select: { reviewsReceived: true } } } },
     },
     orderBy: [{ createdAt: "desc" }, { id: "desc" }],
     take: MAX_LIMIT,
@@ -352,7 +355,13 @@ export async function GET(req: NextRequest) {
       offeredLeaves: t.offeredLeaves,
       bridgeFeeLeaves: t.bridgeFeeLeaves,
       bridgeFeePaidBySender: t.bridgeFeePaidBySender,
-      counterparty,
+      // Built explicitly so the subscription rows stay on the server.
+      counterparty: {
+        id: counterparty.id,
+        name: counterparty.name,
+        avatar: counterparty.avatar,
+        premium: hasPremiumAccess(counterparty.subscriptions),
+      },
       myReview: t.reviews.find((review) => review.reviewerId === viewerId)
         ? { rating: t.reviews.find((review) => review.reviewerId === viewerId)!.rating }
         : null,
@@ -470,6 +479,8 @@ export async function GET(req: NextRequest) {
         trustTier: offerTiers.get(other.id) ?? null,
         // Government ID approved: the tier pill carries its checkmark only then.
         idVerified: !!other.idVerifiedGrandfatheredAt || idVerifiedIds.has(other.id),
+        // Premium or VIP now: the gold PREMIUM tag beside the name.
+        premium: hasPremiumAccess(other.subscriptions),
       },
       /**
        * THE BRIDGE, as the trades screen needs it.
