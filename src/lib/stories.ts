@@ -152,8 +152,16 @@ export interface StoryAuthorWire {
   stories: StoryWire[]
 }
 
-/** Enough rows for any realistic day; the cap keeps one author at 10. */
-const ROW_TAKE = 500
+/**
+ * Enough rows for any realistic day; the cap keeps one author at 10.
+ *
+ * WHEN THERE ARE MORE LIVE STORIES THAN THIS, THE OLDEST ARE THE ONES LEFT
+ * OUT (12 Nov 2026). The row used to be fetched oldest first, so the cut fell
+ * on the NEWEST: past the limit, somebody could share a story that nobody was
+ * ever shown, and nothing told them. A story near the end of its 24 hours
+ * falling off a full row is a limit; a new one vanishing is a bug.
+ */
+export const STORY_ROW_TAKE = 500
 
 /**
  * The stories row: grouped by author, YOU first, then authors with anything
@@ -163,8 +171,10 @@ export async function listStoryRow(
   db: StoryDb,
   viewerId: string,
   now: Date = new Date(),
+  /** How many live stories to load. A parameter so the cut can be checked. */
+  take: number = STORY_ROW_TAKE,
 ): Promise<StoryAuthorWire[]> {
-  const rows = await db.story.findMany({
+  const newestFirst = await db.story.findMany({
     where: liveStoryWhere(viewerId, now),
     select: {
       id: true,
@@ -178,9 +188,14 @@ export async function listStoryRow(
       views: { where: { viewerId }, select: { id: true }, take: 1 },
       _count: { select: { views: true } },
     },
-    orderBy: [{ createdAt: "asc" }, { id: "asc" }],
-    take: ROW_TAKE,
+    // Newest first FOR THE CUT, so `take` drops the oldest. See STORY_ROW_TAKE.
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    take,
   })
+  // ...and back to oldest first for everything below: it is the order a
+  // viewer plays one author's stories in, and the exact reverse of the sort
+  // above, so within the kept rows nothing about the row changes.
+  const rows = newestFirst.reverse()
 
   const byAuthor = new Map<string, StoryAuthorWire & { latest: number }>()
   for (const r of rows) {
