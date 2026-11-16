@@ -356,10 +356,8 @@ export async function POST(req: NextRequest) {
     })
 
     // The "list an item" quest belongs to whoever the row says listed it:
-    // `authorId`, which is the org's backing row for an org post, and
-    // settleQuestsAsync() skips org rows. So a listing posted for an org
-    // completes nobody's quest, the same as before this hook existed. See the
-    // header of @/lib/quests.
+    // `authorId`, which is the shop's backing row for a shop post. A VERIFIED
+    // shop has its own daily quests since 16 Nov 2026; see @/lib/quests.
     settleQuestsAsync(authorId, ["LIST_ITEM"])
 
     // ── Tell the people who asked for this category ─────────────────────────
