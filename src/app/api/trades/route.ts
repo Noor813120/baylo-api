@@ -142,7 +142,7 @@ export async function POST(req: NextRequest) {
     if (pair.fee > 0) {
       return NextResponse.json(
         {
-          error: `Offering a Bracket ${pair.offeredBracket} item for a Bracket ${pair.targetBracket} item costs ${pair.fee} Leaves. Send it as an offer so you can agree to the bridging fee first.`,
+          error: `Offering a Bracket ${pair.offeredBracket} item for a Bracket ${pair.targetBracket} item costs ${pair.fee} points. Send it as an offer so you can agree to the bridging fee first.`,
           code: "BRIDGE_NEEDS_OFFER",
           fee: pair.fee,
         },

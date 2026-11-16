@@ -198,7 +198,7 @@ export async function POST(req: NextRequest) {
       if (!consent?.accepted) {
         return NextResponse.json(
           {
-            error: `Offering a Bracket ${assessed.offeredBracket} item for a Bracket ${assessed.targetBracket} item costs ${proposerFee} Leaves. You have to agree to the bridging fee and the trading policy before this can be sent.`,
+            error: `Offering a Bracket ${assessed.offeredBracket} item for a Bracket ${assessed.targetBracket} item costs ${proposerFee} points. You have to agree to the bridging fee and the trading policy before this can be sent.`,
             code: "CONSENT_REQUIRED",
             fee: proposerFee,
             policyVersion: TRADING_POLICY_VERSION,
@@ -284,7 +284,7 @@ export async function POST(req: NextRequest) {
       if (e instanceof InsufficientLeaves) {
         return NextResponse.json(
           {
-            error: `Proposing this trade costs ${e.need} Leaves and you have ${e.have}. You need ${e.need - e.have} more.`,
+            error: `Proposing this trade costs ${e.need} points and you have ${e.have}. You need ${e.need - e.have} more.`,
             code: "INSUFFICIENT_LEAVES",
             need: e.need,
             have: e.have,
@@ -387,7 +387,7 @@ export async function POST(req: NextRequest) {
          */
         receiverWillPay:
           assessed.payer === "receiver"
-            ? `${post.user.name ?? "They"} will pay a ${assessed.fee}-Leaf bridging fee to accept.`
+            ? `${post.user.name ?? "They"} will pay a ${assessed.fee}-point bridging fee to accept.`
             : null,
         leaves: sender?.leaves ?? 0,
       },

@@ -454,7 +454,7 @@ export const createOfferSchema = z
         code: z.ZodIssueCode.custom,
         path: ["offeredLeaves"],
         message:
-          "Offers no longer carry Leaves. Offer an item in the same bracket, or one bracket below and pay the bridging fee.",
+          "Offers no longer carry points. Offer an item in the same bracket, or one bracket below and pay the bridging fee.",
       })
     }
     if ((v.offeredItems?.length ?? 0) > 1) {

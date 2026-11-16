@@ -121,7 +121,7 @@ export const QUEST_POOL: Record<QuestTier, readonly QuestDef[]> = {
   ],
   HARD: [
     { quest: "COMPLETE_TRADE", label: "Complete a trade", description: "See a trade all the way through to completion." },
-    { quest: "COMPLETE_BRIDGE_TRADE", label: "Complete a bridge trade", description: "Complete a trade that bridges a value gap with Leaves." },
+    { quest: "COMPLETE_BRIDGE_TRADE", label: "Complete a bridge trade", description: "Complete a trade that pays a bridging fee." },
     { quest: "COMPLETE_SAFEZONE_TRADE", label: "Meet at a Safe-Zone Hub", description: "Complete a trade you met for at a Safe-Zone Hub." },
   ],
 } as const
