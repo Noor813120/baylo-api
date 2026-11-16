@@ -204,7 +204,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
         if (!consent?.accepted) {
           return NextResponse.json(
             {
-              error: `Accepting a Bracket ${offer.offeredBracket} item for your Bracket ${offer.targetBracket} one costs ${fee} Leaves. You have to agree to the bridging fee and the trading policy before this can be accepted.`,
+              error: `Accepting a Bracket ${offer.offeredBracket} item for your Bracket ${offer.targetBracket} one costs ${fee} points. You have to agree to the bridging fee and the trading policy before this can be accepted.`,
               code: "CONSENT_REQUIRED",
               fee,
               policyVersion: TRADING_POLICY_VERSION,
@@ -386,7 +386,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       if (e instanceof ReceiverShort) {
         return NextResponse.json(
           {
-            error: `Accepting this costs ${e.need} Leaves and you have ${e.have}. You need ${e.need - e.have} more.`,
+            error: `Accepting this costs ${e.need} points and you have ${e.have}. You need ${e.need - e.have} more.`,
             code: "INSUFFICIENT_LEAVES",
             need: e.need,
             have: e.have,
@@ -427,7 +427,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
             ? `accepted your offer on "${offer.requestedItem.title}"`
             : `declined your offer on "${offer.requestedItem.title}"` +
               (fee > 0 && proposerPays
-                ? ` — your ${fee}-Leaf bridging fee is back in your balance`
+                ? ` — your ${fee}-point bridging fee is back in your balance`
                 : ""),
         link: `/dashboard/messages?partner=${myId}`,
         actorId: myId,
@@ -461,7 +461,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
         offeredItemForCard?.title ??
         tradeRecord?.offeredItemTitle ??
         ((offer.offeredLeaves ?? 0) > 0
-          ? `${offer.offeredLeaves} ${offer.offeredLeaves === 1 ? "Leaf" : "Leaves"}`
+          ? `${offer.offeredLeaves} ${offer.offeredLeaves === 1 ? "point" : "points"}`
           : "Item"),
       requestedItemTitle: offer.requestedItem.title,
       offeredItemImage: firstImage(offeredItemForCard?.images),
