@@ -7,6 +7,8 @@ import { isPremium, isVip, premiumUntil, vipUntil, SUBSCRIPTION_SELECT } from "@
 import { z } from "zod"
 import { resolveSession } from "@/lib/api-auth"
 import { resolveListingOwners } from "@/lib/listing-owner"
+import { ORG_CONTEXT_HEADER, resolveActingIdentity } from "@/lib/organizations"
+import { isSameOwnerPair, sendingAccountsOf } from "@/lib/trade-participant"
 import prisma from "@/lib/prisma"
 import { preciseAccessItemIds } from "@/lib/item-visibility"
 import { visibleItemWhere } from "@/lib/blocking"
@@ -187,39 +189,64 @@ export async function GET(
 
   const isOwner = ownerIds.includes(item.userId)
 
+  // WHO WOULD SEND AN OFFER FROM HERE (16 Nov 2026): the acting identity, as
+  // POST /api/offers now uses. In shop mode that is the SHOP -- its items, its
+  // Leaves, its Premium, its pending offer -- not the person. A dead context
+  // falls back to the person, like `owners` above: this screen only reads.
+  const actingResult = await resolveActingIdentity(prisma, viewerId, req.headers.get(ORG_CONTEXT_HEADER))
+  const acting = actingResult.ok ? actingResult.acting : null
+  const offererId = acting?.actingUserId ?? viewerId
+  const shop = acting?.organization ?? null
+
   // `viewer.existingOfferId` below is what puts the app on §5.2's pending-offer
   // screen instead of the composer, so a lapsed offer has to be EXPIRED before
   // it is read or somebody is held on a screen about an offer that is over.
   // Scoped to this viewer AND this listing: the narrowest sweep that fixes the
   // field this route actually serves.
-  if (!isOwner) await expireStaleOffers(prisma, { senderId: viewerId, postId: item.id })
+  if (!isOwner) await expireStaleOffers(prisma, { senderId: offererId, postId: item.id })
 
   // ── 2, 3, 4, 5, 6 ── concurrent: none depends on another.
-  const [access, existingOffer, tradeable, viewerRow, tiers] = await Promise.all([
+  const [access, existingOffer, tradeable, viewerRow, tiers, accounts, sameOwner] = await Promise.all([
     preciseAccessItemIds(viewerId, [item.id]),
     isOwner
       ? Promise.resolve(null)
       : prisma.trade.findFirst({
-          where: { requestedItemId: item.id, senderId: viewerId, offerStatus: "PENDING" },
+          where: { requestedItemId: item.id, senderId: offererId, offerStatus: "PENDING" },
           select: { id: true },
           orderBy: { createdAt: "desc" },
         }),
     isOwner
       ? Promise.resolve([])
       : prisma.item.findMany({
-          where: { userId: viewerId, status: "AVAILABLE", moderationHiddenAt: null },
-          select: { id: true, title: true, images: ITEM_IMAGES },
+          where: { userId: offererId, status: "AVAILABLE", moderationHiddenAt: null },
+          // valueLeaves: what each is worth, so the offer screen can bracket a
+          // SHOP's items (the person's profile does not list them).
+          select: { id: true, title: true, images: ITEM_IMAGES, valueLeaves: true },
           orderBy: [{ createdAt: "desc" }, { id: "desc" }],
           take: 50,
         }),
     prisma.user.findUnique({
-      where: { id: viewerId },
-      select: { leaves: true, subscriptions: SUBSCRIPTION_SELECT },
+      where: { id: offererId },
+      select: { name: true, avatar: true, leaves: true, subscriptions: SUBSCRIPTION_SELECT },
     }),
     // The same function the contract gates enforce with, so the badge on this
     // screen can never promise something the server would then refuse.
     loadTrustTiers(prisma, [{ id: item.userId, rating: item.user.rating }]),
+    isOwner ? Promise.resolve([]) : sendingAccountsOf(prisma, viewerId),
+    isOwner ? Promise.resolve(false) : isSameOwnerPair(prisma, offererId, item.userId),
   ])
+  // One pending offer per PERSON (see POST /api/offers): one held by another
+  // of this person's accounts. Only ever this person's own account's name.
+  const otherAccountOffer = isOwner || existingOffer
+    ? null
+    : await prisma.trade.findFirst({
+        where: {
+          requestedItemId: item.id,
+          senderId: { in: accounts.filter((a) => a.id !== offererId).map((a) => a.id) },
+          offerStatus: "PENDING",
+        },
+        select: { senderId: true },
+      })
 
   // resolvePickup() recognises the owner by `item.userId === viewerId`, so a
   // shop member managing the shop's listing is passed as the shop -- they see
@@ -262,7 +289,9 @@ export async function GET(
               : "UNAVAILABLE",
       // An owner cannot offer on their own listing, and neither can anyone once
       // it has left AVAILABLE.
-      canOffer: !isOwner && item.status === "AVAILABLE",
+      // Nor between two accounts of one person (their shop's listing, or one
+      // shop's on another's), which POST /api/offers refuses.
+      canOffer: !isOwner && !sameOwner && item.status === "AVAILABLE",
       // Why the offer control is LOCKED for this viewer, when it is. "premium":
       // the listing sits in PREMIUM_MIN_BRACKET or above and the viewer has
       // neither Premium nor VIP live. "vip" is no longer sent: there is no
@@ -287,8 +316,25 @@ export async function GET(
         id: t.id,
         title: t.title,
         image: firstImage(t.images),
+        valueLeaves: t.valueLeaves,
       })),
       existingOfferId: existingOffer?.id ?? null,
+      /**
+       * The account an offer from here is sent AS (16 Nov 2026). `shop` is
+       * null for the person; in shop mode it names the shop, and
+       * `shop.verified: false` means the button is shown inactive (only
+       * verified shops send). Only ever about the viewer's own account.
+       */
+      sendingAs: {
+        id: offererId,
+        name: shop?.name ?? viewerRow?.name ?? "",
+        avatar: viewerRow?.avatar ?? null,
+        shop: shop ? { id: shop.id, verified: shop.verified } : null,
+      },
+      /** Another of the viewer's own accounts already has an offer pending here. */
+      otherAccountOffer: otherAccountOffer
+        ? { name: accounts.find((a) => a.id === otherAccountOffer.senderId)?.name ?? "another of your accounts" }
+        : null,
     },
   })
 }
