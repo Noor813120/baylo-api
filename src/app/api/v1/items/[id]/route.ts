@@ -13,7 +13,7 @@ import prisma from "@/lib/prisma"
 import { preciseAccessItemIds } from "@/lib/item-visibility"
 import { visibleItemWhere } from "@/lib/blocking"
 import { loadTrustTiers } from "@/lib/trust-tiers"
-import { expireStaleOffers } from "@/lib/offers"
+import { expireStaleOffers, offerExpiryCutoff } from "@/lib/offers"
 import { ok, unauthenticated, notFound } from "@/lib/v1/envelope"
 import { parseQuery } from "@/lib/v1/query"
 import { V1_ITEM_SELECT, V1_ITEM_OWNER_SELECT, V1_ITEM_SAFEZONE_SELECT, v1ItemStatsSelect, v1Item, type V1ItemRow } from "@/lib/v1/item"
@@ -206,7 +206,7 @@ export async function GET(
   if (!isOwner) await expireStaleOffers(prisma, { senderId: offererId, postId: item.id })
 
   // ── 2, 3, 4, 5, 6 ── concurrent: none depends on another.
-  const [access, existingOffer, tradeable, viewerRow, tiers, accounts, sameOwner] = await Promise.all([
+  const [access, existingOffer, tradeable, viewerRow, tiers, accounts, sameOwner, incomingOffer] = await Promise.all([
     preciseAccessItemIds(viewerId, [item.id]),
     isOwner
       ? Promise.resolve(null)
@@ -234,6 +234,23 @@ export async function GET(
     loadTrustTiers(prisma, [{ id: item.userId, rating: item.user.rating }]),
     isOwner ? Promise.resolve([]) : sendingAccountsOf(prisma, viewerId),
     isOwner ? Promise.resolve(false) : isSameOwnerPair(prisma, offererId, item.userId),
+    // THIS ITEM IS ALREADY OFFERED TO YOU (16 Nov 2026): a live offer where
+    // the listing being viewed is the item somebody put up for one of YOUR
+    // listings (yours, or your shop's in shop mode -- the Trades tab's
+    // inbox rule). The button then leads to that offer, not to a new one.
+    // Inside the 3-day window only, so a lapsed offer never shows.
+    isOwner
+      ? Promise.resolve(null)
+      : prisma.trade.findFirst({
+          where: {
+            offeredItemId: item.id,
+            receiverId: offererId,
+            offerStatus: "PENDING",
+            createdAt: { gte: offerExpiryCutoff() },
+          },
+          select: { id: true },
+          orderBy: { createdAt: "desc" },
+        }),
   ])
   // One pending offer per PERSON (see POST /api/offers): one held by another
   // of this person's accounts. Only ever this person's own account's name.
@@ -319,6 +336,8 @@ export async function GET(
         valueLeaves: t.valueLeaves,
       })),
       existingOfferId: existingOffer?.id ?? null,
+      /** A live offer that puts THIS item up for one of the viewer's listings. */
+      incomingOfferId: incomingOffer?.id ?? null,
       /**
        * The account an offer from here is sent AS (16 Nov 2026). `shop` is
        * null for the person; in shop mode it names the shop, and
