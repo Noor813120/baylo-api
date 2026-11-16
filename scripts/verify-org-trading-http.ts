@@ -201,13 +201,57 @@ async function main() {
       token: staffToken, orgId: org.organizationId, method: "POST",
       body: { postId: aliceItem2.id, offeredItemId: orgItem2.id },
     })
-    check("[KNOWN FAIL, deferred F] staff with X-Baylo-Org can offer an org item", fromOrg.status === 201, brief(fromOrg))
+    check("the owner with X-Baylo-Org can offer a shop item", fromOrg.status === 201, brief(fromOrg))
     if (fromOrg.status === 201) {
       const row = await prisma.trade.findUnique({
         where: { id: String(fromOrg.body.offerId) }, select: { senderId: true },
       })
-      check("[KNOWN FAIL, deferred F] and the offer is sent BY the org, not the staff member", row?.senderId === org.orgUserId,
+      check("and the offer is sent BY the shop, not the owner", row?.senderId === org.orgUserId,
         `sender ${row?.senderId}`)
+    }
+
+    // ── C2: the rules that only exist once a shop can send (16 Nov 2026) ──
+    console.log("\nC2: shop-sent offer rules")
+    // One pending offer per PERSON: the owner, personally, on the same listing.
+    const ownerThing = await item(owner.id, "owner personal plate")
+    const twice = await call("/api/offers", {
+      token: staffToken, method: "POST",
+      body: { postId: aliceItem2.id, offeredItemId: ownerThing.id },
+    })
+    check("the owner cannot also offer personally on a listing the shop already offered on",
+      twice.status === 409 && twice.body.code === "OFFER_PENDING_OTHER_ACCOUNT", brief(twice))
+    // A personal item while acting as the shop is not the shop's to offer.
+    // A fresh listing: bobItem2 is already in a trade from B.
+    const bobFresh = await item(bob.id, "bob fresh listing")
+    const notShops = await call("/api/offers", {
+      token: staffToken, orgId: org.organizationId, method: "POST",
+      body: { postId: bobFresh.id, offeredItemId: ownerThing.id },
+    })
+    check("acting as the shop, the owner's personal item is refused", notShops.status >= 400 && notShops.status < 500, brief(notShops))
+    // The shop on its owner's own listing: one person on both sides.
+    const ownerListing = await item(owner.id, "owner listing")
+    const orgItem5 = await item(org.orgUserId, "org salt 2")
+    const shopToOwner = await call("/api/offers", {
+      token: staffToken, orgId: org.organizationId, method: "POST",
+      body: { postId: ownerListing.id, offeredItemId: orgItem5.id },
+    })
+    check("the shop cannot offer on its owner's listing",
+      shopToOwner.status === 403 && shopToOwner.body.code === "SHOP_MEMBER_SELF_TRADE", brief(shopToOwner))
+    // An unverified shop may not send.
+    await prisma.organization.update({ where: { id: org.organizationId }, data: { verificationStatus: "PENDING" } })
+    const unverified = await call("/api/offers", {
+      token: staffToken, orgId: org.organizationId, method: "POST",
+      body: { postId: bobFresh.id, offeredItemId: orgItem5.id },
+    })
+    check("an unverified shop cannot send an offer",
+      unverified.status === 403 && unverified.body.code === "SHOP_NOT_VERIFIED", brief(unverified))
+    await prisma.organization.update({ where: { id: org.organizationId }, data: { verificationStatus: "VERIFIED" } })
+    // The shop withdraws its own offer from shop mode.
+    if (fromOrg.status === 201) {
+      const wd = await call(`/api/v1/offers/${String(fromOrg.body.offerId)}/withdraw`, {
+        token: staffToken, orgId: org.organizationId, method: "POST", body: {},
+      })
+      check("the shop can withdraw its own offer", wd.status === 200, brief(wd))
     }
 
     // ── D ───────────────────────────────────────────────────────────────────

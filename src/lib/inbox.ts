@@ -111,16 +111,13 @@ export async function resolveInbox(
  *                                       Profile tab, which in shop mode is the
  *                                       storefront, whose Reviews tab is the
  *                                       shop's.
- *   OUT  TRADE_ACCEPTED, TRADE_REJECTED, NOT A GAP -- NOTHING TO SHOW. All are
- *        OFFER_EXPIRED                  addressed to the offer's SENDER (the
- *                                       rival auto-decline too), and both
- *                                       routes that create a sender write
- *                                       session.user.id: an offer made in shop
- *                                       mode goes out as the PERSON and its
- *                                       answer lands in the person's bell. A
- *                                       backing row cannot sign in, so it is
- *                                       never a sender. Revisit only with
- *                                       shop-initiated offers (decision F).
+ *   IN   TRADE_ACCEPTED, TRADE_REJECTED, addressed to the offer's SENDER (the
+ *        OFFER_EXPIRED                  rival auto-decline too). Since 16 Nov
+ *                                       2026 a shop SENDS offers (POST
+ *                                       /api/offers acts as the shop in shop
+ *                                       mode), so the answer to the shop's
+ *                                       offer lands on its backing row and
+ *                                       must show in its bell (decision F).
  *   --   ID_*, ORG_INVITE, REPORT_*,    addressed to people, never to a backing
  *        FOLLOW_ACCEPTED, org review    row, so there is nothing to filter.
  *
@@ -137,6 +134,10 @@ export function shopBellWhere(): Prisma.NotificationWhereInput {
       { type: "FOLLOW_REQUEST" },
       { type: "TRADE_REQUEST" },
       { type: "TRADE_CANCELLED" },
+      // The answers to an offer the SHOP sent (16 Nov 2026, decision F).
+      { type: "TRADE_ACCEPTED" },
+      { type: "TRADE_REJECTED" },
+      { type: "OFFER_EXPIRED" },
       { type: "MEETUP_PROPOSED" },
       { type: "MEETUP_AGREED" },
       { type: "TRADE_COMPLETED" },
