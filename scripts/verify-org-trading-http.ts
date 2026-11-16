@@ -13,8 +13,8 @@
  *   C         org staff, acting as the org, offer one of the ORG's items on a
  *             person's listing.
  *   QUESTS    the event hook in POST /api/offers settles the people's quests
- *             with no GET /api/v1/quests involved, and never touches the org's
- *             backing row.
+ *             with no GET /api/v1/quests involved. Since 16 Nov 2026 a VERIFIED
+ *             shop gets its own on its backing row, never "Follow a trader".
  *
  *   D         SELF-DEALING. A member (owner, staff, or a PENDING invitee)
  *             offering on their own shop's listing is refused at propose; an
@@ -355,9 +355,15 @@ async function main() {
       (rows) => rows.length === 5,
     )
     check("bob (receiver, then sender) has today's 5 assignments", bobDay.length === 5, `${bobDay.length} rows`)
-    await new Promise((r) => setTimeout(r, 1500))
-    const orgRows = await prisma.userProgress.count({ where: { userId: org.orgUserId, type: "QUEST" } })
-    check("the org's backing row got NO quest assignments", orgRows === 0, `${orgRows} rows`)
+    // Since 16 Nov 2026 a VERIFIED shop has its own daily quests (this one
+    // is verified above), assigned on its own row like a person's. Never
+    // "Follow a trader": a shop cannot follow anyone.
+    const orgDay = await poll(
+      () => prisma.userProgress.findMany({ where: { userId: org.orgUserId, type: "QUEST" } }),
+      (rows) => rows.length === 5,
+    )
+    check("the verified shop has its own 5 assignments", orgDay.length === 5, `${orgDay.length} rows`)
+    check("and never 'Follow a trader'", !orgDay.some((a) => a.quest === "FOLLOW_TRADER"))
   } finally {
     const ids = created.users
     await prisma.trade.deleteMany({ where: { OR: [{ senderId: { in: ids } }, { receiverId: { in: ids } }] } })
