@@ -1,7 +1,7 @@
 import { Prisma, type PrismaClient } from "@/generated/prisma/client"
 import { userNotBlocked, visibleItemWhere } from "@/lib/blocking"
 import { notSuspendedWhere } from "@/lib/moderation"
-import { notAnOrgWhere } from "@/lib/organizations"
+import { ORG_PUBLIC_SELECT, orgBadge, type OrgBadge } from "@/lib/organizations"
 import { SUBSCRIPTION_SELECT, hasPremiumAccess } from "@/lib/premium"
 import {
   V1_ITEM_OWNER_SELECT,
@@ -50,7 +50,9 @@ export function liveStoryWhere(viewerId: string, now: Date = new Date()): Prisma
     user: {
       is: {
         deletedAt: null,
-        ...notAnOrgWhere(),
+        // A shop may post stories since 16 Nov 2026, as a VERIFIED shop only
+        // (the same rule as posting); a person always may.
+        OR: [{ isOrgAccount: false }, { organization: { is: { verificationStatus: "VERIFIED" } } }],
         ...userNotBlocked(viewerId),
         ...notSuspendedWhere(now),
       },
@@ -83,9 +85,12 @@ export async function createListingStory(
 ): Promise<CreateStoryResult> {
   const author = await db.user.findUnique({
     where: { id: authorId },
-    select: { isOrgAccount: true },
+    select: { isOrgAccount: true, organization: { select: { verificationStatus: true } } },
   })
-  if (!author || author.isOrgAccount) return { ok: false, reason: "PERSONAL_ONLY" }
+  // A shop posts its own stories (16 Nov 2026), verified shops only.
+  if (!author || (author.isOrgAccount && author.organization?.verificationStatus !== "VERIFIED")) {
+    return { ok: false, reason: "PERSONAL_ONLY" }
+  }
 
   // Your own, AVAILABLE, not hidden. A shop's listing is owned by the shop's
   // backing row, so it can never pass `userId: authorId` for a person.
@@ -146,7 +151,8 @@ export interface StoryWire {
 
 export interface StoryAuthorWire {
   /** `premium`: Premium or VIP now, for the gold tag beside the name. */
-  user: { id: string; name: string; avatar: string | null; premium: boolean }
+  /** `org`: set when the author is a shop (16 Nov 2026), for its logo and name. */
+  user: { id: string; name: string; avatar: string | null; premium: boolean; org: OrgBadge | null }
   isOwn: boolean
   /** Every story seen (always true for your own). Drives the grey ring. */
   allSeen: boolean
@@ -175,6 +181,12 @@ export async function listStoryRow(
   now: Date = new Date(),
   /** How many live stories to load. A parameter so the cut can be checked. */
   take: number = STORY_ROW_TAKE,
+  /**
+   * Whose stories are "yours" (16 Nov 2026): the acting shop in shop mode, so
+   * the shop's circle leads the row. Blocks and visibility still follow the
+   * person (`viewerId`).
+   */
+  ownId: string = viewerId,
 ): Promise<StoryAuthorWire[]> {
   const newestFirst = await db.story.findMany({
     where: liveStoryWhere(viewerId, now),
@@ -183,7 +195,7 @@ export async function listStoryRow(
       caption: true,
       createdAt: true,
       expiresAt: true,
-      user: { select: { id: true, name: true, avatar: true, subscriptions: SUBSCRIPTION_SELECT } },
+      user: { select: { id: true, name: true, avatar: true, subscriptions: SUBSCRIPTION_SELECT, organization: { select: ORG_PUBLIC_SELECT } } },
       item: {
         select: { ...V1_ITEM_SELECT, user: { select: V1_ITEM_OWNER_SELECT }, ...V1_ITEM_SAFEZONE_SELECT },
       },
@@ -204,11 +216,11 @@ export async function listStoryRow(
     // liveStoryWhere() requires the item, so this is never null; the guard
     // is for the type, which cannot see the WHERE clause.
     if (!r.item) continue
-    const isOwn = r.user.id === viewerId
+    const isOwn = r.user.id === ownId
     const seen = isOwn || r.views.length > 0
     let group = byAuthor.get(r.user.id)
     if (!group) {
-      group = { user: { id: r.user.id, name: r.user.name, avatar: r.user.avatar, premium: hasPremiumAccess(r.user.subscriptions) }, isOwn, allSeen: true, stories: [], latest: 0 }
+      group = { user: { id: r.user.id, name: r.user.name, avatar: r.user.avatar, premium: hasPremiumAccess(r.user.subscriptions), org: r.user.organization ? orgBadge(r.user.organization) : null }, isOwn, allSeen: true, stories: [], latest: 0 }
       byAuthor.set(r.user.id, group)
     }
     group.stories.push({
