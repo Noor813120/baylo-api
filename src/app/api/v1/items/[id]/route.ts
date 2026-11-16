@@ -3,7 +3,7 @@ import { bracketOf, valueNeedsPremium } from "@/lib/brackets"
 import { valueCap } from "@/lib/trade-rules"
 import { valueRejectionSentence } from "@/lib/value-rejection"
 import { ownerAppealState } from "@/lib/appeals"
-import { isPremium, isVip, premiumUntil, vipUntil, SUBSCRIPTION_SELECT } from "@/lib/premium"
+import { hasPremiumAccess, isPremium, isVip, premiumUntil, vipUntil, SUBSCRIPTION_SELECT } from "@/lib/premium"
 import { z } from "zod"
 import { resolveSession } from "@/lib/api-auth"
 import { resolveListingOwners } from "@/lib/listing-owner"
@@ -330,6 +330,9 @@ export async function GET(
         name: shop?.name ?? viewerRow?.name ?? "",
         avatar: viewerRow?.avatar ?? null,
         shop: shop ? { id: shop.id, verified: shop.verified } : null,
+        // The SENDER's Premium (the shop's own in shop mode): what the
+        // bridging-fee quote is discounted by. POST /api/offers re-derives it.
+        premium: hasPremiumAccess(viewerRow?.subscriptions),
       },
       /** Another of the viewer's own accounts already has an offer pending here. */
       otherAccountOffer: otherAccountOffer
