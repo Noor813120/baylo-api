@@ -29,12 +29,12 @@
  * money side of a shop's trades -- settlement, fees, rewards -- is in
  * verify-org-settlement-http.ts.
  *
- * C IS EXPECTED TO FAIL, DELIBERATELY. Shop-initiated offers were deferred on
- * 26 Sep 2026 (decision F): POST /api/offers still acts as the signed-in human,
- * so a staff member's offer is sent BY the person, and the shop's item is not
- * theirs to offer. The check stays in, reporting FAIL and labelled as known,
- * so the day it is built there is already a test waiting to turn green. A run
- * of this file is healthy when C is the ONLY failure.
+ * C IS GREEN SINCE 16 NOV 2026 (decision F built): POST /api/offers sends as
+ * the acting identity, so the owner's offer in shop mode is the SHOP's. C2
+ * pins the rules that came with it: one pending offer per person across
+ * their profile and shops, the shop cannot offer on its owner's listing or
+ * offer the owner's personal item, an unverified shop cannot send, and the
+ * shop can withdraw its own offer. A healthy run has no failures.
  *
  * Fixtures are tagged, created through Prisma and the org library, and
  * deleted in `finally`.
