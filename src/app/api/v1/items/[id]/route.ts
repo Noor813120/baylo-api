@@ -309,6 +309,12 @@ export async function GET(
       // Nor between two accounts of one person (their shop's listing, or one
       // shop's on another's), which POST /api/offers refuses.
       canOffer: !isOwner && !sameOwner && item.status === "AVAILABLE",
+      /**
+       * The listing belongs to another of the viewer's OWN accounts (their
+       * shop, or their personal profile while acting as a shop, or another
+       * of their shops). The button says so instead of "Not available".
+       */
+      ownAccount: !isOwner && sameOwner,
       // Why the offer control is LOCKED for this viewer, when it is. "premium":
       // the listing sits in PREMIUM_MIN_BRACKET or above and the viewer has
       // neither Premium nor VIP live. "vip" is no longer sent: there is no
