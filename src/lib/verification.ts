@@ -85,8 +85,16 @@ export async function markVerified(
     // still there to catch a miss. Verification itself must not fail over it.
   }
 
-  // 3. The signup grant.
-  const grantAwarded = await claimSignupGrant(userId, at)
+  // 3. The signup grant. Best-effort like step 2 (18 Nov 2026): if it fails
+  //    -- a busy database timing the transaction out -- the account is still
+  //    verified, and settleVerificationRewards() pays it on the next app open
+  //    instead of the verify link erroring after the flag already flipped.
+  let grantAwarded = 0
+  try {
+    grantAwarded = await claimSignupGrant(userId, at)
+  } catch {
+    // Left for settleVerificationRewards().
+  }
 
   return { flipped, grantAwarded, taskAwarded }
 }
@@ -159,4 +167,40 @@ export async function claimUnverifiedForGoogle(userId: string): Promise<void> {
     data: { password: null },
   })
   if (cleared.count > 0) await revokeUserFamilies(userId)
+}
+
+/**
+ * Pays a VERIFIED account's welcome points if verification left them unpaid
+ * (18 Nov 2026).
+ *
+ * markVerified() flips the flag first and pays afterwards, in separate
+ * statements, so a failure between them (a busy database timing out a
+ * transaction) left an account showing "Verified" with no points. The email
+ * link is single use, so nothing ever retried. GET /api/v1/home calls this
+ * for a verified account whose `signupGrantClaimed` is still false, so the
+ * points arrive the next time the app opens.
+ *
+ * Safe to call any number of times: the grant is claimed by a conditional
+ * update and VERIFY_ACCOUNT by the task's unique ledger row, so each pays
+ * once per account. Never throws. Returns the points paid on this call.
+ */
+export async function settleVerificationRewards(userId: string, at: Date = new Date()): Promise<number> {
+  let paid = 0
+  try {
+    const res = await prisma.$transaction(async (tx) =>
+      awardTask(tx as TaskDb, userId, "VERIFY_ACCOUNT", "", {
+        description: "Task reward: verified your account",
+        eventAt: at,
+      }),
+    )
+    paid += res.awarded
+  } catch {
+    // Tried again on the next open.
+  }
+  try {
+    paid += await claimSignupGrant(userId, at)
+  } catch {
+    // Tried again on the next open.
+  }
+  return paid
 }
