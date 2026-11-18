@@ -17,6 +17,7 @@ import { sharedCategories, matchReason } from "@/lib/category-match"
 import { ORG_CONTEXT_HEADER, notAnOrgWhere, resolveActingIdentity } from "@/lib/organizations"
 import { excludeDirectMessageNotifications, shopBellWhere } from "@/lib/inbox"
 import { expirePerishableItems } from "@/lib/perishable"
+import { settleVerificationRewards } from "@/lib/verification"
 
 export const dynamic = "force-dynamic"
 
@@ -91,7 +92,7 @@ export async function GET(req: NextRequest) {
       select: {
         id: true, name: true, avatar: true, location: true,
         leaves: true, lifetimeLeaves: true, rating: true,
-        totalTrades: true, isVerified: true,
+        totalTrades: true, isVerified: true, signupGrantClaimed: true,
         items: { where: { status: "AVAILABLE" }, select: { category: true } },
       },
     }),
@@ -110,6 +111,18 @@ export async function GET(req: NextRequest) {
     }),
   ])
   if (!viewer) return unauthenticated()
+
+  // WELCOME POINTS THAT NEVER LANDED (18 Nov 2026): verified, but the grant
+  // was never claimed -- a failure between the two steps of markVerified().
+  // Paid here, once, so the balance below already includes it. Shops' rows are
+  // created with the grant claimed, so this only ever touches people.
+  if (viewer.isVerified && !viewer.signupGrantClaimed) {
+    const paid = await settleVerificationRewards(viewer.id)
+    if (paid > 0) {
+      viewer.leaves += paid
+      viewer.lifetimeLeaves += paid
+    }
+  }
 
   const { page, nextCursor } = paginate(feedRows, limit, (r) =>
     encodeCursor(r.createdAt, r.id),
